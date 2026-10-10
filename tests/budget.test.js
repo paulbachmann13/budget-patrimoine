@@ -223,10 +223,11 @@ test('aucune donnée personnelle dans le dépôt (règles génériques seulement
     ...fs.readdirSync(path.join(root, 'tests')).filter((f) => f.endsWith('.js')).map((f) => `tests/${f}`),
     ...fs.readdirSync(path.join(root, 'tools')).filter((f) => f.endsWith('.js')).map((f) => `tools/${f}`)];
   // Règles personnelles locales (hors dépôt) : si le fichier est là, ses libellés de plusieurs mots
-  // (nom + prénom, commerce) sont aussi interdits ; un mot seul peut être générique (« lydia »).
+  // (nom + prénom, commerce) sont aussi interdits ; un mot seul peut être générique (« lydia »),
+  // et une formule de la banque (« wero vers ») n'a aucun mot utile au sens de ruleKey.
   const localRules = path.join(root, 'regles-perso.json');
   const localMatches = fs.existsSync(localRules)
-    ? JSON.parse(fs.readFileSync(localRules, 'utf8')).rules.map((r) => B.normLabel(r.match)).filter((m) => m.includes(' '))
+    ? JSON.parse(fs.readFileSync(localRules, 'utf8')).rules.map((r) => B.normLabel(r.match)).filter((m) => m.includes(' ') && B.ruleKey(m) !== '')
     : [];
   for (const f of files) {
     const text = B.normLabel(fs.readFileSync(path.join(root, f), 'utf8'));
