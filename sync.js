@@ -18,8 +18,8 @@
 'use strict';
 
 const SUPABASE = {
-  url: '',  // ex. https://xxxx.supabase.co
-  key: '',  // clé « anon » / publishable (jamais la clé service_role)
+  url: 'https://gwsomltfixhoikwkpqmd.supabase.co',
+  key: 'sb_publishable_ZtC6h8l38XYDa8WXo1-Zmw_tIrTIhmh', // clé publishable (jamais la clé secret / service_role)
 };
 
 /* ==========================================================================
