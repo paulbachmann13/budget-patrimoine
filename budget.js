@@ -33,6 +33,9 @@ const BudgetCore = (() => {
     { name: 'Shopping', kind: 'depense' },
     { name: 'Voyages', kind: 'depense' },
     { name: 'Études', kind: 'depense' },
+    { name: 'Espèces', kind: 'depense' },
+    { name: 'Frais bancaires', kind: 'depense' },
+    { name: "Jeux d'argent", kind: 'depense' },
     { name: 'Autre dépense', kind: 'depense' },
     { name: 'Salaire', kind: 'revenu' },
     { name: 'Remboursement', kind: 'revenu' },
@@ -47,23 +50,30 @@ const BudgetCore = (() => {
   const DEFAULT_RULES = [
     // Alimentation & restauration
     // (un mot suivi d'une espace = mot entier : « esso » ne doit pas attraper « espresso »)
-    ...['carrefour', 'leclerc', 'auchan', 'lidl', 'intermarche', 'monoprix', 'franprix', 'picard', 'super u', 'u express', 'casino shop', 'biocoop', 'aldi ', 'netto ', 'boulangerie', 'boucherie', 'mcdo', 'mc donald', 'burger king', 'kfc', 'quick ', 'subway', 'uber eats', 'deliveroo', 'just eat', 'restaurant', 'sushi', 'pizza', 'kebab', 'tacos', 'crous']
+    ...['carrefour', 'leclerc', 'auchan', 'lidl', 'intermarche', 'monoprix', 'franprix', 'picard', 'super u', 'u express', 'casino shop', 'biocoop', 'aldi ', 'netto ', 'boulangerie', 'boucherie', 'mcdo', 'mc donald', 'burger king', 'kfc', 'quick ', 'subway', 'uber eats', 'deliveroo', 'just eat', 'restaurant', 'sushi', 'pizza', 'kebab', 'tacos', 'crous', 'eurest', 'sodexo', 'izly', 'swile', 'edeka', 'rewe ', 'scheck-in', 'kaufland', 'penny ']
       .map((m) => ({ match: m, category: 'Alimentation & restauration' })),
-    ...['bar ', 'cafe', 'brasserie', 'pub ', 'starbucks'].map((m) => ({ match: m, category: 'Bar / Café' })),
+    ...['bar ', 'cafe', 'brasserie', 'pub ', 'starbucks', 'coffee'].map((m) => ({ match: m, category: 'Bar / Café' })),
     // Transport & carburant
-    ...['total energies', 'totalenergies', 'esso ', 'shell ', 'station service', 'carburant', 'avia '].map((m) => ({ match: m, category: 'Carburant' })),
-    ...['sncf', 'ouigo', 'ratp', 'tcl ', 'rtm ', 'blablacar', 'uber', 'bolt ', 'flixbus', 'peage', 'vinci autoroutes', 'sanef', 'aprr', 'asf ', 'navigo', 'ter '].map((m) => ({ match: m, category: 'Transport' })),
+    ...['total energies', 'totalenergies', 'esso ', 'shell ', 'station service', 'carburant', 'avia ', 'aral '].map((m) => ({ match: m, category: 'Carburant' })),
+    ...['sncf', 'ouigo', 'ratp', 'tcl ', 'rtm ', 'blablacar', 'uber', 'bolt ', 'flixbus', 'peage', 'vinci autoroutes', 'sanef', 'aprr', 'asf ', 'navigo', 'ter ', 'trainline', 'easypark', 'parking', 'parkhaus', 'contipark', 'parken ', 'lavage', 'elephant bleu', 'norauto'].map((m) => ({ match: m, category: 'Transport' })),
     // Abonnements & factures
-    ...['netflix', 'spotify', 'disney', 'canal+', 'youtube', 'apple.com/bill', 'icloud', 'google one', 'amazon prime', 'deezer', 'openai', 'anthropic'].map((m) => ({ match: m, category: 'Abonnements' })),
+    ...['netflix', 'spotify', 'disney', 'canal+', 'youtube', 'apple.com/bill', 'icloud', 'google one', 'amazon prime', 'deezer', 'openai', 'anthropic', 'github'].map((m) => ({ match: m, category: 'Abonnements' })),
     ...['edf ', 'engie', 'loyer', 'free mobile', 'orange ', 'sfr ', 'bouygues', 'assurance', 'macif', 'maif', 'axa ', 'eau '].map((m) => ({ match: m, category: 'Logement & factures' })),
     // Santé, sport, shopping, voyages
     ...['pharmacie', 'docteur', 'medecin', 'dentiste', 'mutuelle', 'optique'].map((m) => ({ match: m, category: 'Santé' })),
-    ...['decathlon', 'basic fit', 'basic-fit', 'fitness', 'padel', 'cinema', 'steam ', 'playstation'].map((m) => ({ match: m, category: 'Sport / Loisirs' })),
+    ...['decathlon', 'basic fit', 'basic-fit', 'fitness', 'padel', 'cinema', 'steam ', 'playstation', 'playtomic', 'helloasso', 'hello asso', 'shotgun', 'bowling', 'sony interactive'].map((m) => ({ match: m, category: 'Sport / Loisirs' })),
     ...['amazon', 'zalando', 'fnac', 'ikea', 'cdiscount', 'vinted', 'zara ', 'h&m', 'leroy merlin', 'darty', 'boulanger '].map((m) => ({ match: m, category: 'Shopping' })),
-    ...['airbnb', 'booking', 'ryanair', 'easyjet', 'air france', 'transavia', 'hotel', 'lufthansa'].map((m) => ({ match: m, category: 'Voyages' })),
+    ...['airbnb', 'booking', 'ryanair', 'easyjet', 'air france', 'transavia', 'hotel', 'lufthansa', 'edreams', 'opodo', 'expedia'].map((m) => ({ match: m, category: 'Voyages' })),
     // Revenus & épargne
-    ...['salaire', 'paie ', 'gratification', 'indemnite stage'].map((m) => ({ match: m, category: 'Salaire', sign: 'in' })),
+    ...['salaire', 'salary', 'lohn', 'gehalt', 'paie ', 'gratification', 'indemnite stage'].map((m) => ({ match: m, category: 'Salaire', sign: 'in' })),
     ...['bforbank', 'livret', 'pea ', 'trade republic', 'boursorama bourse'].map((m) => ({ match: m, category: 'Épargne / placements' })),
+    // Banque : espèces, frais, jeux
+    ...['retrait au distributeur', 'retrait dab', 'retrait especes'].map((m) => ({ match: m, category: 'Espèces' })),
+    { match: "versement d'especes", category: 'Virement interne' },
+    ...['cotisation offre', 'frais bancaires', 'frais de tenue', 'agios', 'commission '].map((m) => ({ match: m, category: 'Frais bancaires' })),
+    ...['winamax', 'betclic', 'unibet', 'pari mutuel', 'pmu ', 'parions sport', 'fdj ', 'francaise des jeux'].map((m) => ({ match: m, category: "Jeux d'argent" })),
+    // En dernier : tout virement reçu non reconnu (libellé du Crédit Agricole)
+    { match: 'virement en votre faveur', category: 'Virements reçus', sign: 'in' },
   ];
 
   /* ---------- Texte ---------- */
@@ -81,11 +91,22 @@ const BudgetCore = (() => {
       .trim();
   }
 
-  /** Clé de règle « apprise » à partir d'un libellé : les 2 premiers mots utiles. */
+  /**
+   * Clé de règle « apprise » à partir d'un libellé : les 2 premiers mots utiles, consécutifs
+   * (la clé doit se retrouver telle quelle dans les libellés similaires). Les types
+   * d'opération (« Virement en votre faveur », « Wero vers », « WEB M. »…) sont sautés.
+   */
   function ruleKey(label) {
-    const stop = new Set(['prlv', 'vir', 'virement', 'sepa', 'de', 'du', 'la', 'le', 'les', 'des', 'a', 'et', 'achat', 'paiement', 'retrait', 'inst', 'instantane', 'recu', 'emis']);
-    const words = normLabel(label).split(' ').filter((w) => w.length > 1 && !/^\d+$/.test(w) && !stop.has(w));
-    return words.slice(0, 2).join(' ');
+    const stop = new Set(['prlv', 'vir', 'virement', 'sepa', 'de', 'du', 'la', 'le', 'les', 'des', 'a', 'et', 'achat', 'paiement', 'par', 'retrait', 'inst', 'instantane', 'recu', 'emis',
+      'en', 'votre', 'faveur', 'vers', 'web', 'wero', 'au', 'ou', 'm', 'mme', 'mr', 'mle', 'mlle', 'prelevement', 'cotisation', 'avoir']);
+    const useful = (w) => {
+      const b = (w || '').replace(/[.'\/-]+$/, '');
+      return b.length > 1 && !/^\d+$/.test(b) && !stop.has(b);
+    };
+    const words = normLabel(label).split(' ');
+    const i = words.findIndex(useful);
+    if (i < 0) return '';
+    return useful(words[i + 1]) ? `${words[i]} ${words[i + 1]}` : words[i];
   }
 
   /* ---------- Dates & montants ---------- */

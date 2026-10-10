@@ -91,6 +91,59 @@ test('ruleKey : deux premiers mots utiles', () => {
   assert.equal(B.ruleKey('PRLV SEPA EDF CLIENTS'), 'edf clients');
 });
 
+test('ruleKey : libellés Crédit Agricole (type d\'opération sauté, mots consécutifs)', () => {
+  assert.equal(B.ruleKey('Virement en votre faveur DE M. DUPONT JEAN'), 'dupont jean');
+  assert.equal(B.ruleKey('Virement émis WEB M. DUPONT JEAN'), 'dupont jean');
+  assert.equal(B.ruleKey('Paiement par carte X1234 BOULANGERIE MARTIN 12/05 - Martin'), 'boulangerie martin');
+  // « A » (initiale) n'est pas utile : la clé s'arrête à « durand », qui figure bien dans le libellé
+  const label = 'Virement émis Wero vers DURAND A - pizza';
+  const key = B.ruleKey(label);
+  assert.equal(key, 'durand');
+  assert.ok(B.normLabel(label).includes(key), 'la clé doit se retrouver dans le libellé');
+  assert.equal(B.ruleKey('Cotisation Offre Essentiel'), 'offre essentiel');
+  assert.equal(B.ruleKey('Virement en votre faveur'), '');
+});
+
+test('import CSV au format Crédit Agricole (préambule, libellés sur plusieurs lignes, débit/crédit)', () => {
+  // Données fictives
+  const csv = [
+    '', 'Téléchargement du 10/10/2026;', '', '', 'M.       DUPONT JEAN',
+    'Compte de Dépôt carte n° 00000000000;', 'Solde au 10/10/2026 1 000,00 €', '',
+    'Liste des opérations du compte entre le 01/09/2026 et le 10/10/2026;', '',
+    'Date;Libellé;Débit euros;Crédit euros;',
+    '08/10/2026;"Paiement par carte', 'X1234 CARREFOUR CITY PARIS   07/10 - Carrefour', '', '', '', '";1 234,50;;',
+    '07/10/2026;"Virement en votre faveur', 'VIR INST WERO de MARTIN PAUL', '', '', '', '01a1zz";;20,00;',
+    '01/10/2026;"Retrait au distributeur', 'X1234 PARIS         30/09 10H00', '', '', '', '";40,00;;',
+    '30/09/2026;"Cotisation', 'Offre Essentiel', '', '', '', '";3,00;;',
+    '29/09/2026;"Virement en votre faveur', 'Société Exemple - SALARY 09-2026', '', '', '', 'REF123";;1 500,00;',
+  ].join('\r\n');
+  const { rows, delimiter } = B.parseCsv(csv);
+  assert.equal(delimiter, ';');
+  const { headerRow, cols } = B.detectColumns(rows);
+  assert.deepEqual([cols.date, cols.label, cols.amount, cols.debit, cols.credit], [0, 1, -1, 2, 3]);
+  const { transactions: tx, skipped } = B.extractTransactions(rows, headerRow, cols);
+  assert.deepEqual(skipped, []);
+  assert.deepEqual(tx.map((t) => [t.date, t.amount]), [
+    ['2026-10-08', -1234.5], ['2026-10-07', 20], ['2026-10-01', -40], ['2026-09-30', -3], ['2026-09-29', 1500],
+  ]);
+  assert.equal(tx[0].label, 'Paiement par carte X1234 CARREFOUR CITY PARIS 07/10 - Carrefour', 'libellé sur une seule ligne');
+  assert.deepEqual(tx.map((t) => B.categorize(t)), [
+    'Alimentation & restauration', 'Virements reçus', 'Espèces', 'Frais bancaires', 'Salaire',
+  ]);
+});
+
+test('catégories bancaires génériques : jeux, frais, virement reçu en dernier recours', () => {
+  const tx = (label, amount) => ({ label, amount });
+  assert.equal(B.categorize(tx('Paiement par carte X1234 WINAMAX france PARIS 06/07', -100)), "Jeux d'argent");
+  assert.equal(B.categorize(tx('Virement en votre faveur VIR INST de WINAMAX - VOTRE RETRAIT', 100)), "Jeux d'argent", 'un gain réduit la dépense de jeu');
+  assert.equal(B.categorize(tx('Virement en votre faveur DE M. DUPONT', 50)), 'Virements reçus');
+  assert.equal(B.categorize(tx('Virement en votre faveur DE M. DUPONT', 50), [{ match: 'dupont', category: 'Virement interne' }]), 'Virement interne', 'règle perso avant le dernier recours');
+  assert.equal(B.categorize(tx("Versement d'espèces", 100)), 'Virement interne');
+  for (const name of ['Espèces', 'Frais bancaires', "Jeux d'argent"]) {
+    assert.equal(B.kindOf(name, B.DEFAULT_CATEGORIES), 'depense');
+  }
+});
+
 test('synthèse mensuelle : revenus, dépenses, net, catégories neutres exclues', () => {
   const cats = B.DEFAULT_CATEGORIES;
   const txs = [
