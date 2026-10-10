@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Budget &amp; Patrimoine</title>
+  <meta name="description" content="Budget, patrimoine et suivi de mon PEA — données stockées uniquement dans le navigateur.">
+
+  <!-- PWA / iOS -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0d0d0d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Patrimoine">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+
+  <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
+  <link rel="stylesheet" href="style.css?v=2.0.0">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="view-title">Patrimoine</h1>
+    <div class="topbar-actions">
+      <span class="version" id="version-badge" title="Version de l'appli"></span>
+      <button class="icon-btn" id="btn-refresh" type="button" aria-label="Actualiser l'appli et les cours">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <!-- =========================================================
+         0. PATRIMOINE (comptes + PEA)
+         ========================================================= -->
+    <section id="view-patrimoine" class="view" data-title="Patrimoine">
+      <div class="hero card">
+        <p class="label">Patrimoine total</p>
+        <p class="hero-value" id="p-total">0,00 €</p>
+        <div class="split-bar" id="p-split" aria-hidden="true"></div>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi card"><p class="label">Comptes</p><p class="kpi-value" id="p-cash">0,00 €</p></div>
+        <div class="kpi card"><p class="label">PEA</p><p class="kpi-value" id="p-pea">0,00 €</p><p class="hint" id="p-pea-pv"></p></div>
+      </div>
+
+      <h2>Dernier mois du budget</h2>
+      <div class="card"><p class="hint" style="margin-top:0" id="p-month"></p></div>
+
+      <h2>Mes comptes</h2>
+      <div class="card">
+        <p class="hint" style="margin-top:0">Soldes saisis à la main (compte courant, livret…). Le PEA est repris automatiquement de l'onglet Bilan.</p>
+        <div id="p-accounts" class="stack"></div>
+        <p class="empty" id="p-accounts-empty">Aucun compte pour l'instant.</p>
+        <form id="account-form" class="form" autocomplete="off">
+          <div class="row">
+            <label>Nom
+              <input name="name" type="text" placeholder="Livret A">
+            </label>
+            <label>Solde (€)
+              <input name="balance" type="text" inputmode="decimal" placeholder="1 250,50">
+            </label>
+          </div>
+          <p class="error" id="account-error" hidden></p>
+          <button type="submit" class="btn">+ Ajouter un compte</button>
+        </form>
+      </div>
+
+      <div class="card" id="p-import-old" hidden>
+        <p class="label">Reprendre mon Suivi PEA d'origine</p>
+        <p class="hint">Copie les achats de l'appli d'origine (lue sans la modifier) dans cette appli.</p>
+        <button class="btn btn-block" id="btn-import-old-pea" type="button">Reprendre mes achats PEA</button>
+      </div>
+    </section>
+
+    <!-- =========================================================
+         0 bis. BUDGET (import CSV, catégories, graphiques)
+         ========================================================= -->
+    <section id="view-budget" class="view" data-title="Budget" hidden>
+      <div class="month-nav">
+        <button class="icon-btn" id="btn-month-prev" type="button" aria-label="Mois précédent">‹</button>
+        <strong id="month-label"></strong>
+        <button class="icon-btn" id="btn-month-next" type="button" aria-label="Mois suivant">›</button>
+      </div>
+
+      <div class="card" id="budget-empty">
+        <p class="label">Aucune transaction</p>
+        <p class="hint">Importez l'export CSV de votre banque : la détection des colonnes est automatique, et vous pouvez la corriger avant d'importer. Rien n'est envoyé sur internet.</p>
+      </div>
+
+      <div id="budget-body" hidden>
+        <div class="kpis">
+          <div class="kpi card"><p class="label">Revenus</p><p class="kpi-value pos" id="b-income">—</p></div>
+          <div class="kpi card"><p class="label">Dépenses</p><p class="kpi-value" id="b-expense">—</p></div>
+          <div class="kpi card"><p class="label">Solde du mois</p><p class="kpi-value" id="b-net">—</p></div>
+          <div class="kpi card"><p class="label">Taux d'épargne</p><p class="kpi-value" id="b-rate">—</p></div>
+        </div>
+        <p class="hint" id="b-neutral"></p>
+
+        <h2>12 derniers mois</h2>
+        <div class="card chart-card">
+          <div class="legend"><span><i class="key key-income"></i>Revenus</span><span><i class="key key-expense"></i>Dépenses</span></div>
+          <div id="b-bars" class="chart" role="img" aria-label="Revenus et dépenses par mois"></div>
+          <p class="hint">Touchez un mois pour l'afficher.</p>
+        </div>
+
+        <h2>Dépenses par catégorie</h2>
+        <div class="card">
+          <div id="b-categories" class="stack"></div>
+          <p class="empty" id="b-categories-empty">Aucune dépense ce mois-ci.</p>
+          <button class="btn btn-small" id="btn-clear-filter" type="button" hidden>Retirer le filtre</button>
+        </div>
+
+        <h2>Transactions <span class="hint" id="b-list-count"></span></h2>
+        <p class="hint" id="b-uncat" hidden></p>
+        <input type="search" id="budget-search" class="search" placeholder="Rechercher un libellé" autocomplete="off">
+        <div id="b-list" class="card tx-list"></div>
+        <p class="empty" id="b-list-empty">Aucune transaction.</p>
+      </div>
+
+      <h2>Importer</h2>
+      <div class="card stack">
+        <p class="hint" style="margin-top:0">Export CSV de votre banque (les doublons déjà importés sont ignorés).</p>
+        <label class="btn btn-primary" for="csv-file">⬆︎ Importer un export bancaire (CSV)</label>
+        <input type="file" id="csv-file" class="visually-hidden" accept=".csv,text/csv,text/plain,.txt">
+      </div>
+
+      <h2>Règles de catégorisation</h2>
+      <div class="card stack">
+        <p class="hint" style="margin-top:0" id="rules-count"></p>
+        <p class="hint">Quand vous changez la catégorie d'une transaction, l'appli propose de retenir la règle. Vos règles personnelles restent sur cet appareil : gardez-les dans un fichier JSON (jamais dans le dépôt GitHub).</p>
+        <label class="btn" for="rules-import-file">⬆︎ Importer des règles (JSON)</label>
+        <input type="file" id="rules-import-file" class="visually-hidden" accept="application/json,.json,text/plain">
+        <button class="btn" id="btn-rules-export" type="button">⬇︎ Exporter mes règles</button>
+        <button class="btn" id="btn-recategorize" type="button">↻ Recalculer les catégories</button>
+      </div>
+
+      <h2>Sauvegarde du budget</h2>
+      <div class="card stack">
+        <p class="hint" style="margin-top:0">Les transactions restent dans ce navigateur. Exportez-les de temps en temps (Fichiers / iCloud Drive) : c'est aussi la façon de passer d'un appareil à l'autre. Le fichier contient vos données bancaires : ne le partagez pas.</p>
+        <button class="btn" id="btn-budget-export" type="button">⬇︎ Exporter le budget (JSON)</button>
+        <label class="btn" for="budget-import-file">⬆︎ Importer une sauvegarde du budget</label>
+        <input type="file" id="budget-import-file" class="visually-hidden" accept="application/json,.json,text/plain">
+      </div>
+    </section>
+
+    <!-- =========================================================
+         1. TABLEAU DE BORD
+         ========================================================= -->
+    <section id="view-dashboard" class="view" data-title="Bilan PEA" hidden>
+      <div class="banner" id="backup-banner" hidden>
+        <p id="backup-text"></p>
+        <button class="btn btn-small btn-primary" id="btn-backup-now">Exporter</button>
+      </div>
+
+      <div class="hero card">
+        <p class="label">Valeur actuelle</p>
+        <p class="hero-value" id="kpi-value">0,00 €</p>
+        <p class="hero-delta" id="kpi-pv">+0,00 € (+0,00 %)</p>
+        <p class="hint" id="kpi-net" hidden></p>
+        <p class="hint" id="kpi-warning" hidden></p>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi card"><p class="label">Total investi</p><p class="kpi-value" id="kpi-invested">0,00 €</p></div>
+        <div class="kpi card"><p class="label">Plus-value (hors frais)</p><p class="kpi-value" id="kpi-pv-eur">0,00 €</p></div>
+        <div class="kpi card"><p class="label">PRU (hors frais)</p><p class="kpi-value" id="kpi-pru">—</p></div>
+        <div class="kpi card"><p class="label">Nombre de parts</p><p class="kpi-value" id="kpi-qty">0</p></div>
+        <div class="kpi card"><p class="label">Rendement annualisé</p><p class="kpi-value" id="kpi-xirr">—</p><p class="hint" id="kpi-xirr-hint"></p></div>
+        <div class="kpi card" id="kpi-cash-card"><p class="label">Cash disponible</p><p class="kpi-value" id="kpi-cash">—</p><p class="hint" id="kpi-cash-hint"></p></div>
+      </div>
+
+      <h2>Cours actuels</h2>
+      <p class="hint" id="quotes-status">« Actualiser le cours » récupère le dernier cours sur Euronext. Vous pouvez toujours le corriger à la main.</p>
+      <div id="positions" class="stack"></div>
+
+      <h2 id="chart-perf-title">Ma performance <span class="perf-now" id="chart-perf-now"></span></h2>
+      <div class="card chart-card" id="chart-perf-card">
+        <div id="chart-perf" class="chart" role="img" aria-label="Performance totale du portefeuille depuis le premier achat"></div>
+        <p class="hint" id="chart-perf-hint" hidden></p>
+      </div>
+
+      <h2 id="chart-cumul-title">Valeur et versements</h2>
+      <div class="card chart-card">
+        <div class="legend" id="chart-cumul-legend">
+          <span><i class="key key-invested"></i>Versé</span>
+          <span id="legend-value"><i class="key-line key-value"></i>Valeur</span>
+        </div>
+        <div id="chart-cumul" class="chart" role="img" aria-label="Évolution de la valeur du portefeuille et des versements cumulés"></div>
+      </div>
+    </section>
+
+    <!-- =========================================================
+         2. ACHATS
+         ========================================================= -->
+    <section id="view-purchases" class="view" data-title="Mes achats" hidden>
+      <form id="plan-form" class="card form" autocomplete="off">
+        <h2 class="card-title">Prochain achat</h2>
+        <div class="row">
+          <label>Montant (€)
+            <input name="amount" inputmode="decimal" type="text">
+          </label>
+          <label>Cours (€)
+            <input name="price" inputmode="decimal" type="text">
+          </label>
+        </div>
+        <label>Frais de courtage (€)
+          <input name="fees" inputmode="decimal" type="text" placeholder="0">
+        </label>
+        <p class="plan-result" id="plan-result"></p>
+        <p class="hint" id="plan-left"></p>
+        <button type="button" class="btn btn-primary" id="btn-plan-save" disabled>Enregistrer cet achat</button>
+      </form>
+
+      <button class="btn btn-block" id="btn-add">+ Ajouter un achat</button>
+      <div id="purchase-list" class="stack"></div>
+      <p class="empty" id="purchase-empty">Aucun achat pour l'instant.<br>Ajoutez votre premier versement DCA 👆</p>
+    </section>
+
+    <!-- =========================================================
+         3. SIMULATEUR
+         ========================================================= -->
+    <section id="view-simulator" class="view" data-title="Simulateur" hidden>
+      <!-- Mes vrais achats comparés à l'hypothèse de rendement -->
+      <div class="card" id="real-card" hidden>
+        <h2 class="card-title">Mon DCA réel vs l'hypothèse</h2>
+        <p class="hint" id="real-pace" style="margin-top:0"></p>
+        <div class="split">
+          <div><p class="label"><i class="key-line key-value"></i>Valeur réelle</p><p class="kpi-value" id="real-value"></p></div>
+          <div><p class="label"><i class="key-line key-rate"></i><span id="real-rate-label"></span></p><p class="kpi-value" id="real-expected"></p></div>
+        </div>
+        <p class="hero-delta real-diff" id="real-diff"></p>
+        <p class="hint" id="real-xirr"></p>
+        <div class="real-chart" id="real-chart-box">
+          <div class="legend">
+            <span><i class="key key-invested"></i>Versé</span>
+            <span><i class="key-line key-value"></i>Valeur réelle</span>
+            <span><i class="key-line key-rate"></i><span id="real-legend-rate">Au taux</span></span>
+          </div>
+          <div id="chart-real" class="chart" role="img" aria-label="Valeur réelle de mes achats comparée à l'hypothèse de rendement"></div>
+        </div>
+        <p class="hint" id="real-chart-hint" hidden>La courbe s'affiche pour les titres dont l'historique est publié chaque soir (DCAM).</p>
+      </div>
+
+      <form id="sim-form" class="card form" autocomplete="off">
+        <label class="switch-row">
+          <span>Utiliser mes vrais chiffres
+            <small class="hint" id="sim-real-hint">Valeur actuelle et versement mensuel moyen, calculés depuis vos achats.</small>
+          </span>
+          <input type="checkbox" id="sim-real" role="switch">
+        </label>
+        <label>Versement mensuel (€)
+          <input name="monthly" inputmode="decimal" type="text" required>
+        </label>
+        <label>Rendement annuel moyen (%)
+          <input name="rate" inputmode="decimal" type="text" required>
+        </label>
+        <label>Durée (années)
+          <input name="years" inputmode="numeric" type="text" required>
+        </label>
+        <label>Capital de départ (€)
+          <input name="initial" inputmode="decimal" type="text">
+        </label>
+        <label>Frais annuels de l'ETF (%)
+          <input name="ter" inputmode="decimal" type="text">
+        </label>
+        <p class="error" id="sim-error" hidden></p>
+      </form>
+
+      <div class="hero card">
+        <p class="label" id="sim-final-label">Capital final estimé</p>
+        <p class="hero-value" id="sim-final">0,00 €</p>
+        <div class="split">
+          <div><p class="label"><span class="key key-invested"></span>Versé</p><p class="kpi-value" id="sim-invested">0 €</p></div>
+          <div><p class="label"><span class="key key-gains"></span>Gains</p><p class="kpi-value" id="sim-gains">0 €</p></div>
+        </div>
+        <div class="bar" aria-hidden="true"><span id="sim-bar-invested"></span><span id="sim-bar-gains"></span></div>
+        <p class="hint" id="sim-share"></p>
+      </div>
+
+      <div class="card chart-card">
+        <div id="chart-sim" class="chart" role="img" aria-label="Projection du capital"></div>
+      </div>
+      <!-- Argent fictif : un seul versement, rien n'est enregistré -->
+      <form id="whatif-form" class="card form" autocomplete="off">
+        <h2 class="card-title">Et si je plaçais de l'argent fictif ?</h2>
+        <div class="row">
+          <label>Montant placé (€)
+            <input name="amount" inputmode="decimal" type="text" value="10000" required>
+          </label>
+          <label>Au bout de
+            <input name="duration" inputmode="numeric" type="text" value="1" required>
+          </label>
+          <label>Unité
+            <select name="unit">
+              <option value="months">mois</option>
+              <option value="years">ans</option>
+            </select>
+          </label>
+        </div>
+        <p class="error" id="whatif-error" hidden></p>
+        <div id="whatif-result" hidden>
+          <p class="label" id="whatif-label" style="margin-top:16px"></p>
+          <p class="hero-value" id="whatif-final"></p>
+          <p class="hero-delta" id="whatif-gain"></p>
+          <div class="whatif-table" id="whatif-table"></div>
+        </div>
+        <p class="hint">Un seul versement, aucun achat réel : rien n'est enregistré. Rendement et frais repris des réglages ci-dessus. Sur un mois, la bourse peut varier de plusieurs % dans un sens ou dans l'autre : le résultat réel peut être très différent de cette moyenne.</p>
+      </form>
+
+      <p class="hint">Simulation indicative : rendement constant, versements en fin de mois, hors fiscalité. Les performances passées ne préjugent pas des performances futures.</p>
+    </section>
+
+    <!-- =========================================================
+         4. PEA : compteur 5 ans, plafond, sauvegarde
+         ========================================================= -->
+    <section id="view-pea" class="view" data-title="Mon PEA" hidden>
+      <div class="card">
+        <label class="form">Date d'ouverture du PEA
+          <input type="date" id="opening-date">
+        </label>
+        <p class="label" style="margin-top:16px">Avant les 5 ans</p>
+        <p class="hero-value" id="pea-remaining">—</p>
+        <p class="hint" id="pea-date"></p>
+        <div class="gauge" aria-hidden="true"><span id="pea-gauge-time"></span></div>
+      </div>
+
+      <h2>Versements sur le PEA</h2>
+      <form id="deposit-form" class="card form" autocomplete="off">
+        <p class="hint" style="margin:0 0 12px">Les virements de votre compte courant vers le PEA. Ils servent au plafond de 150 000 € et au calcul du cash disponible.</p>
+        <div class="row">
+          <label>Date
+            <input type="date" name="date" required>
+          </label>
+          <label>Montant (€)
+            <input type="text" name="amount" inputmode="decimal" required>
+          </label>
+        </div>
+        <p class="error" id="deposit-error" hidden></p>
+        <button type="submit" class="btn btn-primary">+ Ajouter le versement</button>
+        <div id="deposit-list" class="stack"></div>
+      </form>
+
+      <div class="card">
+        <p class="label">Plafond de versements</p>
+        <p class="kpi-value" id="pea-ceiling">0 € / 150 000 €</p>
+        <div class="gauge" aria-hidden="true"><span id="pea-gauge-ceiling"></span></div>
+        <p class="hint" id="pea-ceiling-left"></p>
+        <p class="hint" id="pea-ceiling-source"></p>
+      </div>
+
+      <h2>Sauvegarde</h2>
+      <div class="card stack">
+        <p class="hint">Les données restent sur ce téléphone. Exportez-les régulièrement (Fichiers / iCloud Drive).</p>
+        <button class="btn" id="btn-export">⬇︎ Exporter (JSON)</button>
+        <label class="btn" for="import-file">⬆︎ Importer une sauvegarde</label>
+        <!-- visually-hidden et non display:none : sinon le label n'ouvre pas le sélecteur sur certains iPhone -->
+        <input type="file" id="import-file" class="visually-hidden" accept="application/json,.json,text/plain">
+      </div>
+
+      <h2>Réglages</h2>
+      <div class="card">
+        <label class="switch-row">
+          <span>Actualiser les cours automatiquement
+            <small class="hint">Une fois par jour, à l'ouverture de l'appli (Euronext).</small>
+          </span>
+          <input type="checkbox" id="set-autorefresh" role="switch">
+        </label>
+        <button class="btn btn-block" id="btn-theme">Passer en thème clair</button>
+      </div>
+      <p class="hint center" id="app-version"></p>
+    </section>
+  </main>
+
+  <!-- Barre d'onglets (bas d'écran, pouce-friendly) -->
+  <nav class="tabbar" aria-label="Navigation">
+    <a href="#patrimoine" data-view="patrimoine"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 10l9-6 9 6"/><path d="M5 10v9h14v-9"/><path d="M9 19v-5h6v5"/></svg>Patrimoine</a>
+    <a href="#budget" data-view="budget"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h3"/></svg>Budget</a>
+    <a href="#dashboard" data-view="dashboard"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v9h9"/></svg>Bilan</a>
+    <a href="#purchases" data-view="purchases"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Achats</a>
+    <a href="#simulator" data-view="simulator"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18l6-6 4 4 6-8"/><path d="M15 8h5v5"/></svg>Simu</a>
+    <a href="#pea" data-view="pea"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 13V9M10 2h4M12 2v3"/></svg>PEA</a>
+  </nav>
+
+  <!-- Fenêtre d'ajout / modification d'un achat -->
+  <dialog id="purchase-dialog">
+    <form id="purchase-form" class="form" method="dialog" autocomplete="off">
+      <h2 id="purchase-dialog-title">Nouvel achat</h2>
+      <input type="hidden" name="id">
+      <label>Date
+        <input type="date" name="date" required>
+      </label>
+      <label>Ticker (ex. DCAM)
+        <input type="text" name="ticker" list="tickers" required autocapitalize="characters" autocorrect="off" spellcheck="false">
+      </label>
+      <datalist id="tickers">
+        <option value="DCAM">Amundi PEA Monde (MSCI World) — FR001400U5Q4</option>
+      </datalist>
+      <div class="row">
+        <label>Nombre de parts
+          <input type="text" name="qty" inputmode="decimal" required>
+        </label>
+        <label>Prix unitaire (€)
+          <input type="text" name="price" inputmode="decimal" required>
+        </label>
+      </div>
+      <label>Frais (€)
+        <input type="text" name="fees" inputmode="decimal" placeholder="0">
+      </label>
+      <p class="hint" id="purchase-total"></p>
+      <p class="error" id="purchase-error" hidden></p>
+      <div class="row">
+        <button type="button" class="btn" id="btn-cancel">Annuler</button>
+        <button type="submit" class="btn btn-primary" value="save">Enregistrer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Fenêtre d'import d'un export bancaire (CSV) -->
+  <dialog id="csv-dialog">
+    <div class="form">
+      <h2>Importer un export bancaire</h2>
+      <p class="hint" style="margin-top:0">Fichier : <span id="csv-file-name"></span>. Vérifiez les colonnes détectées.</p>
+      <label>Date
+        <select id="csv-col-date"></select>
+      </label>
+      <label>Libellé
+        <select id="csv-col-label"></select>
+      </label>
+      <label>Montant (une seule colonne, négatif = dépense)
+        <select id="csv-col-amount"></select>
+      </label>
+      <div class="row">
+        <label>Débit
+          <select id="csv-col-debit"></select>
+        </label>
+        <label>Crédit
+          <select id="csv-col-credit"></select>
+        </label>
+      </div>
+      <p class="hint">Si votre banque a deux colonnes (débit et crédit), laissez « Montant » sur « (aucune) ».</p>
+      <p class="label" id="csv-summary"></p>
+      <div id="csv-preview" class="stack csv-preview"></div>
+      <div class="row">
+        <button type="button" class="btn" id="csv-cancel">Annuler</button>
+        <button type="button" class="btn btn-primary" id="csv-confirm" disabled>Importer</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="banner banner-update" id="update-banner" hidden>
+    <p>Nouvelle version de l'appli installée.</p>
+    <button class="btn btn-small btn-primary" id="btn-reload">Recharger</button>
+  </div>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="budget.js?v=2.0.0"></script>
+  <script src="app.js?v=2.0.0"></script>
+</body>
+</html>

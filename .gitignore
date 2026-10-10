@@ -1,0 +1,9 @@
+# Données personnelles : ne jamais les mettre dans le dépôt (il est public)
+*.csv
+budget-*.json
+regles-*.json
+pea-*.json
+node_modules/
+
+# Exception : fixtures de test publiques (cours Euronext, aucune donnée perso)
+!tests/fixtures/euronext-*.csv

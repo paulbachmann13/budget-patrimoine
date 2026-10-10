@@ -1,0 +1,650 @@
+/* Tests des calculs — lancer avec : node --test tests/ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { Calc, Dates, Store, Fmt, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls, Euronext, QuoteError } = require('../app.js');
+const { parseChart } = require('../tools/fetch-prices.js');
+
+const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} ≠ ${b}`);
+
+// Scénario DCA type : 3 achats de DCAM
+const purchases = [
+  { id: 'a', date: '2026-01-05', ticker: 'DCAM', qty: 16, price: 6.00, fees: 0.99 },
+  { id: 'b', date: '2026-02-05', ticker: 'dcam', qty: 17, price: 5.80, fees: 0.99 },
+  { id: 'c', date: '2026-03-05', ticker: 'DCAM', qty: 15, price: 6.40, fees: 0 },
+];
+
+test('parseNumber accepte les formats français', () => {
+  assert.equal(Calc.parseNumber('6,12'), 6.12);
+  assert.equal(Calc.parseNumber('1 234,5'), 1234.5);
+  assert.equal(Calc.parseNumber('1 234,50 €'), 1234.5);
+  assert.equal(Calc.parseNumber('7.5'), 7.5);
+  assert.equal(Calc.parseNumber('', true), 0);
+  assert.ok(Number.isNaN(Calc.parseNumber('')));
+  assert.ok(Number.isNaN(Calc.parseNumber('abc')));
+  assert.ok(Number.isNaN(Calc.parseNumber('1,2,3')));
+});
+
+test('PRU = (Σ parts × prix + frais) / Σ parts', () => {
+  const pf = Calc.portfolio(purchases, {});
+  // investi = 96 + 0,99 + 98,6 + 0,99 + 96 = 292,58 ; parts = 48
+  close(pf.invested, 292.58);
+  assert.equal(pf.qty, 48);
+  close(pf.pru, 292.58 / 48);
+  close(pf.fees, 1.98);
+  assert.equal(pf.positions.length, 1, 'tickers normalisés en majuscules');
+});
+
+test('plus-value avec cours saisi', () => {
+  const pf = Calc.portfolio(purchases, { DCAM: { price: 6.50, date: '2026-03-10' } });
+  close(pf.value, 48 * 6.5);              // 312
+  close(pf.pv, 312 - 292.58);             // +19,42
+  close(pf.pvPct, (312 - 292.58) / 292.58);
+  assert.deepEqual(pf.missingQuotes, []);
+});
+
+test('moins-value et valorisation au dernier prix sans cours', () => {
+  const baisse = Calc.portfolio(purchases, { DCAM: { price: 5.00 } });
+  close(baisse.pv, 240 - 292.58);
+  assert.ok(baisse.pvPct < 0);
+
+  const sansCours = Calc.portfolio(purchases, {});
+  close(sansCours.value, 48 * 6.40); // dernier achat (05/03) à 6,40
+  assert.deepEqual(sansCours.missingQuotes, ['DCAM']);
+});
+
+test('portefeuille vide', () => {
+  const pf = Calc.portfolio([], {});
+  assert.equal(pf.invested, 0);
+  assert.equal(pf.pvPct, 0);
+  assert.equal(pf.pru, null);
+});
+
+test('plusieurs titres : pas de PRU global', () => {
+  const pf = Calc.portfolio([...purchases, { date: '2026-03-06', ticker: 'PAEEM', qty: 2, price: 25, fees: 0 }], {});
+  assert.equal(pf.positions.length, 2);
+  assert.equal(pf.pru, null);
+  close(pf.invested, 342.58);
+});
+
+test('versements cumulés', () => {
+  const s = Calc.cumulativeSeries([...purchases].reverse());
+  assert.deepEqual(s.map((p) => p.date), ['2026-01-05', '2026-02-05', '2026-03-05']);
+  close(s[0].total, 96.99);
+  close(s[2].total, 292.58);
+});
+
+test('simulateur : taux nul = somme des versements', () => {
+  const r = Calc.simulate({ monthly: 100, annualRate: 0, years: 10 });
+  close(r.final, 12000);
+  close(r.gains, 0);
+  assert.equal(r.points.length, 121);
+});
+
+test('simulateur : formule de la rente (versements fin de mois)', () => {
+  const r = Calc.simulate({ monthly: 100, annualRate: 7, years: 20 });
+  const i = Math.pow(1.07, 1 / 12) - 1;
+  const n = 240;
+  const expected = 100 * (Math.pow(1 + i, n) - 1) / i;
+  close(r.final, expected, 1e-6);
+  close(r.invested, 24000);
+  close(r.gains, expected - 24000, 1e-6);
+  close(r.gainsShare, (expected - 24000) / expected, 1e-9);
+  // ordre de grandeur connu : ~50 900 €
+  assert.ok(r.final > 50500 && r.final < 51500, String(r.final));
+});
+
+test('simulateur : capital initial et frais ETF', () => {
+  const init = Calc.simulate({ monthly: 0, annualRate: 5, years: 10, initial: 1000 });
+  close(init.final, 1000 * Math.pow(1.05, 10), 1e-6);
+
+  const withTer = Calc.simulate({ monthly: 0, annualRate: 7, years: 10, initial: 1000, ter: 0.2 });
+  close(withTer.final, 1000 * Math.pow(1.07 * 0.998, 10), 1e-6);
+});
+
+test('compteur 5 ans', () => {
+  const c = Calc.peaCountdown('2026-09-24', '2026-09-24');
+  assert.equal(c.targetISO, '2031-09-24');
+  assert.deepEqual(c.remaining, { years: 5, months: 0, days: 0 });
+  assert.equal(c.progress, 0);
+  assert.equal(c.reached, false);
+
+  const mid = Calc.peaCountdown('2024-01-31', '2026-03-15');
+  assert.equal(mid.targetISO, '2029-01-31');
+  assert.deepEqual(mid.remaining, { years: 2, months: 10, days: 16 });
+
+  const done = Calc.peaCountdown('2020-02-29', '2025-03-01');
+  assert.equal(done.targetISO, '2025-02-28');
+  assert.equal(done.reached, true);
+  assert.equal(done.progress, 1);
+});
+
+test('plafond 150 000 €', () => {
+  const c = Calc.ceiling(30000);
+  assert.equal(c.remaining, 120000);
+  close(c.progress, 0.2);
+  assert.equal(Calc.ceiling(200000).progress, 1);
+});
+
+test('import : données valides nettoyées, invalides rejetées', () => {
+  const ok = Store.sanitize({ purchases, prices: { dcam: { price: 6.5 } }, openingDate: '2025-01-01' });
+  assert.equal(ok.purchases[1].ticker, 'DCAM');
+  assert.equal(ok.prices.DCAM.price, 6.5);
+  assert.throws(() => Store.sanitize({}));
+  assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-13-01', ticker: 'X', qty: 1, price: 1 }] }));
+  assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-01-01', ticker: 'X', qty: -1, price: 1 }] }));
+});
+
+test('formats français', () => {
+  const nbsp = /[  ]/g;
+  assert.equal(Fmt.eur(1234.5).replace(nbsp, ' '), '1 234,50 €');
+  assert.equal(Fmt.date('2026-03-05'), '05/03/2026');
+  assert.equal(Fmt.input(6.12), '6,12');
+  assert.equal(Fmt.signedPct(0.0664).replace(nbsp, ' '), '+6,64 %');
+});
+
+test('calculateur prochain achat : parts entières et reste', () => {
+  const r = Calc.buyPlan(100, 6.12, 0);
+  assert.equal(r.qty, 16);
+  close(r.cost, 97.92);
+  close(r.left, 2.08);
+
+  const withFees = Calc.buyPlan(100, 6.12, 0.99); // (100 − 0,99) / 6,12 = 16,17
+  assert.equal(withFees.qty, 16);
+  close(withFees.cost, 98.91);
+
+  assert.equal(Calc.buyPlan(12, 6, 0).qty, 2, 'montant pile : pas d\'erreur d\'arrondi');
+  assert.equal(Calc.buyPlan(5, 6.12).qty, 0);
+  assert.equal(Calc.buyPlan(0, 6), null);
+  assert.equal(Calc.buyPlan(100, 0), null);
+});
+
+test('versements, cash et base du plafond', () => {
+  const none = Calc.deposits([], purchases);
+  assert.equal(none.hasDeposits, false);
+  close(none.base, 292.58);
+  assert.equal(none.cash, null);
+
+  const dep = Calc.deposits([{ date: '2026-01-02', amount: 200 }, { date: '2026-03-01', amount: 150 }], purchases);
+  close(dep.base, 350);
+  close(dep.cash, 350 - 292.58);
+});
+
+test('TRI : cas simples', () => {
+  // 1 000 € placés, 1 100 € un an (365 j) plus tard → 10 %
+  close(Calc.xirr([{ date: '2025-01-01', amount: -1000 }, { date: '2026-01-01', amount: 1100 }]), 0.10, 1e-6);
+  // perte : 1 000 → 900 → −10 %
+  close(Calc.xirr([{ date: '2025-01-01', amount: -1000 }, { date: '2026-01-01', amount: 900 }]), -0.10, 1e-6);
+  // DCA : deux versements de 100 €, valeur finale 210 €, contrôle par la VAN
+  const flows = [{ date: '2025-01-01', amount: -100 }, { date: '2025-07-02', amount: -100 }, { date: '2026-01-01', amount: 210 }];
+  const r = Calc.xirr(flows);
+  const t0 = Dates.parse('2025-01-01');
+  const npv = flows.reduce((s, f) => s + f.amount / Math.pow(1 + r, Dates.daysBetween(t0, Dates.parse(f.date)) / 365), 0);
+  close(npv, 0, 1e-6);
+  assert.ok(r > 0.05 && r < 0.08, String(r));
+  // incalculable : que des sorties
+  assert.equal(Calc.xirr([{ date: '2025-01-01', amount: -100 }, { date: '2025-02-01', amount: -100 }]), null);
+});
+
+test('TRI du portefeuille', () => {
+  const x = Calc.portfolioXirr(purchases, 312, '2026-09-05');
+  assert.equal(x.days, 243);
+  assert.ok(x.rate > 0);
+  assert.equal(Calc.portfolioXirr([], 0), null);
+});
+
+test('série valeur vs versements', () => {
+  const hist = { DCAM: [['2026-01-02', 5.9], ['2026-01-05', 6.0], ['2026-01-06', 6.1], ['2026-02-05', 5.8], ['2026-02-06', 5.9], ['2026-03-05', 6.4], ['2026-03-06', 6.5]] };
+  const s = Calc.valueSeries(purchases, hist);
+  assert.equal(s[0].date, '2026-01-05', 'démarre au premier achat');
+  close(s[0].value, 16 * 6.0);
+  close(s[0].invested, 96.99);
+  close(s[1].value, 16 * 6.1);
+  const last = s[s.length - 1];
+  assert.equal(last.date, '2026-03-06');
+  close(last.value, 48 * 6.5);
+  close(last.invested, 292.58);
+  // titre sans historique → pas de série
+  assert.deepEqual(Calc.valueSeries(purchases, {}), []);
+});
+
+test('fichier de cours : lecture et fusion avec les cours saisis', () => {
+  const parsed = parsePricesFile({
+    updatedAt: '2026-09-24T18:00:00Z',
+    quotes: { dcam: { price: 6.17, date: '2026-09-24', history: [['2026-09-24', 6.17], ['2026-09-23', 6.1], ['bad', 1]] } },
+  });
+  assert.deepEqual(parsed.quotes.DCAM, { price: 6.17, date: '2026-09-24' });
+  assert.deepEqual(parsed.histories.DCAM, [['2026-09-23', 6.1], ['2026-09-24', 6.17]]);
+  assert.equal(parsePricesFile({}), null);
+
+  // cours manuel du jour : conservé ; cours manuel plus ancien : remplacé
+  const p1 = { DCAM: { price: 6.2, date: '2026-09-24', source: 'manuel' } };
+  assert.equal(mergeQuotes(p1, parsed.quotes), 0);
+  assert.equal(p1.DCAM.price, 6.2);
+  const p2 = { DCAM: { price: 6.0, date: '2026-09-20', source: 'manuel' } };
+  assert.equal(mergeQuotes(p2, parsed.quotes), 1);
+  assert.deepEqual(p2.DCAM, { price: 6.17, date: '2026-09-24', source: 'auto', at: null });
+  // cours auto déjà identique : rien à faire
+  assert.equal(mergeQuotes(p2, parsed.quotes), 0);
+});
+
+test('URL des cours selon l\'hébergement', () => {
+  assert.deepEqual(priceUrls({ hostname: 'paulbachmann13.github.io', pathname: '/suivie-pea/' }), [
+    'https://raw.githubusercontent.com/paulbachmann13/suivie-pea/main/data/prices.json',
+    'data/prices.json',
+  ]);
+  assert.deepEqual(priceUrls({ hostname: 'localhost', pathname: '/' }), ['data/prices.json']);
+});
+
+test('script GitHub Action : lecture de la réponse Yahoo', () => {
+  // 2 séances (heure de Paris) ; une clôture manquante (null) est ignorée
+  const ts = (iso) => Math.floor(Date.parse(iso) / 1000);
+  const json = { chart: { result: [{
+    meta: { currency: 'EUR', exchangeTimezoneName: 'Europe/Paris', regularMarketPrice: 6.1734, regularMarketTime: ts('2026-09-24T15:30:00Z') },
+    timestamp: [ts('2026-09-22T07:00:00Z'), ts('2026-09-23T07:00:00Z'), ts('2026-09-24T07:00:00Z')],
+    indicators: { quote: [{ close: [6.1, null, 6.15] }] },
+  }] } };
+  const q = parseChart(json);
+  assert.equal(q.price, 6.1734);
+  assert.equal(q.date, '2026-09-24');
+  assert.deepEqual(q.history, [['2026-09-22', 6.1], ['2026-09-24', 6.1734]]);
+  assert.throws(() => parseChart({ chart: { result: null, error: { code: 'Not Found' } } }));
+});
+
+test('adresses versionnées identiques dans index.html (cache de GitHub Pages)', () => {
+  const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.html'), 'utf8');
+  assert.ok(html.includes(`src="app.js?v=${APP_VERSION}"`), 'index.html doit charger app.js?v=' + APP_VERSION);
+  assert.ok(html.includes(`href="style.css?v=${APP_VERSION}"`), 'index.html doit charger style.css?v=' + APP_VERSION);
+  const sw = require('fs').readFileSync(require('path').join(__dirname, '..', 'sw.js'), 'utf8');
+  assert.match(sw, /'\.\/app\.js\?v=' \+ VERSION/);
+  assert.match(sw, /'\.\/style\.css\?v=' \+ VERSION/);
+});
+
+test('version identique dans app.js et sw.js', () => {
+  const sw = require('fs').readFileSync(require('path').join(__dirname, '..', 'sw.js'), 'utf8');
+  const m = sw.match(/const VERSION = '([^']+)'/);
+  assert.ok(m, 'VERSION introuvable dans sw.js');
+  assert.equal(m[1], APP_VERSION);
+});
+
+test('chargement tolérant : une ligne abîmée n\'efface plus tout', () => {
+  const { state, dropped, errors } = Store.clean({ purchases: [
+    { id: 'a', date: '2026-01-05', ticker: 'DCAM', qty: 16, price: 6, fees: 0 },
+    { id: 'b', date: '2026-02-30', ticker: 'DCAM', qty: 10, price: 6, fees: 0 },
+  ] });
+  assert.equal(state.purchases.length, 1);
+  assert.equal(dropped, 1);
+  assert.match(errors[0], /Achat n°2/);
+  // l'import d'un fichier reste strict
+  assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-02-30', ticker: 'X', qty: 1, price: 1 }] }), /Achat n°1/);
+});
+
+test('import : nombres en texte, identifiants en double, réglages invalides', () => {
+  const s = Store.sanitize({
+    purchases: [
+      { id: 'x', date: '2026-01-05', ticker: 'dcam', qty: '16', price: '6,12', fees: '0,99' },
+      { id: 'x', date: '2026-02-05', ticker: 'DCAM', qty: 1, price: 6 },
+    ],
+    sim: { monthly: '150', rate: 'abc', years: 500, initial: -3, ter: '0,3' },
+    plan: { amount: 0, fees: '1' },
+    prices: { DCAM: { price: '6,2', date: 'hier', source: 'bidule' } },
+  });
+  assert.equal(s.purchases[0].price, 6.12);
+  assert.equal(s.purchases[0].fees, 0.99);
+  assert.notEqual(s.purchases[0].id, s.purchases[1].id);
+  assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3, useReal: true });
+  assert.deepEqual(s.plan, { amount: 100, fees: 1 });
+  assert.deepEqual(s.prices.DCAM, { price: 6.2, date: '', source: 'manuel', at: null });
+  assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-01-05', ticker: 'X', qty: Infinity, price: 1 }] }));
+});
+
+test('tickers : ISIN et suffixe de place ramenés au ticker', () => {
+  assert.equal(Calc.normTicker(' dcam.pa '), 'DCAM');
+  assert.equal(Calc.normTicker('fr001400u5q4'), 'DCAM');
+  assert.equal(Calc.normTicker('paeem'), 'PAEEM');
+});
+
+test('pas de « −0,00 » pour une variation arrondie à zéro', () => {
+  const nbsp = /[  ]/g;
+  assert.equal(Fmt.signedEur(-2.8e-14).replace(nbsp, ' '), '0,00 €');
+  assert.equal(Fmt.signedEur(-0.004).replace(nbsp, ' '), '0,00 €');
+  assert.equal(Fmt.signedEur(-0.006).replace(nbsp, ' '), '-0,01 €');
+  assert.equal(Fmt.signedPct(-1e-9).replace(nbsp, ' '), '0,00 %');
+  assert.equal(Fmt.trend(-2.8e-14), '');
+  assert.equal(Fmt.trend(0.01), 'pos');
+  assert.equal(Fmt.trend(-0.01), 'neg');
+});
+
+test('simulateur : bornes des paramètres', () => {
+  assert.equal(Calc.validSim('rate', -150), false);
+  assert.equal(Calc.validSim('rate', -100), false);
+  assert.equal(Calc.validSim('rate', -20), true);
+  assert.equal(Calc.validSim('ter', 100), false);
+  assert.equal(Calc.validSim('years', 81), false);
+  assert.equal(Calc.validSim('monthly', -1), false);
+  assert.ok(Number.isFinite(Calc.simulate({ monthly: 100, annualRate: -99, years: 10 }).final));
+});
+
+/* ---------- Cours en direct (Euronext) ---------- */
+const fs = require('fs');
+const path = require('path');
+const FIX = (f) => fs.readFileSync(path.join(__dirname, 'fixtures', f), 'utf8');
+
+/** Faux fetch : répond selon l'URL, et note les appels. */
+function fakeFetch(routes) {
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    for (const [pattern, reply] of routes) {
+      if (url.includes(pattern)) {
+        if (reply instanceof Error) throw reply;
+        const { status = 200, body = '' } = reply;
+        return { ok: status >= 200 && status < 300, status, text: async () => body };
+      }
+    }
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('Euronext : ticker PSP5 → ISIN, place et nom (réponse réelle)', () => {
+  const ins = Euronext.pickInstrument(JSON.parse(FIX('euronext-search-psp5.json')), 'psp5');
+  assert.deepEqual(ins, { isin: 'FR0011871128', mic: 'XPAR', symbol: 'PSP5', name: 'Amundi PEA S&P 500 UCITS ETF Acc' });
+  assert.equal(Euronext.pickInstrument([{ label: 'See all results', isin: '', mic: '' }], 'X'), null);
+  // priorité au ticker exact, puis à Paris
+  const many = [
+    { isin: 'NL0000000001', mic: 'XAMS', label: "<span class='symbol'>PSP5</span>" },
+    { isin: 'FR0000000002', mic: 'XPAR', label: "<span class='symbol'>PSP</span>" },
+    { isin: 'FR0011871128', mic: 'XPAR', label: "<span class='symbol'>PSP5</span>" },
+  ];
+  assert.equal(Euronext.pickInstrument(many, 'PSP5').isin, 'FR0011871128');
+});
+
+test('Euronext : lecture du CSV d\'historique (réponse réelle)', () => {
+  assert.deepEqual(Euronext.parseHistoryCsv(FIX('euronext-history-psp5.csv')), { date: '2026-09-28', price: 59.37 });
+  // clôture vide → dernier cours ; lignes parasites ignorées
+  const csv = "Can't open log\nDate;Open;High;Low;Last;Close\n29/09/2026;1;1;1;60.10;\n";
+  assert.deepEqual(Euronext.parseHistoryCsv(csv), { date: '2026-09-29', price: 60.1 });
+  assert.equal(Euronext.parseHistoryCsv('Date;Open\n'), null);
+});
+
+test('Euronext : cours de PSP5 par ticker et par ISIN', async () => {
+  const f = fakeFetch([
+    ['instrumentSearch', { body: FIX('euronext-search-psp5.json') }],
+    ['getFullDownloadAjax/FR0011871128-XPAR', { body: FIX('euronext-history-psp5.csv') }],
+  ]);
+  for (const query of ['PSP5', 'FR0011871128']) {
+    const q = await Euronext.quote(query, null, f);
+    assert.equal(q.price, 59.37);
+    assert.equal(q.date, '2026-09-28');
+    assert.equal(q.instrument.isin, 'FR0011871128');
+    assert.ok(!Number.isNaN(Date.parse(q.at)));
+  }
+  assert.match(f.calls[0], /q=PSP5/);
+  assert.match(f.calls[1], /format=csv/);
+  // instrument déjà connu : pas de nouvelle recherche
+  const g = fakeFetch([['getFullDownloadAjax', { body: FIX('euronext-history-psp5.csv') }]]);
+  await Euronext.quote('PSP5', { isin: 'FR0011871128', mic: 'XPAR' }, g);
+  assert.equal(g.calls.length, 1);
+});
+
+test('Euronext : erreurs traduites en messages clairs', async () => {
+  const code = async (routes, known = null) => {
+    try { await Euronext.quote('PSP5', known, fakeFetch(routes)); return 'ok'; } catch (e) { assert.ok(e instanceof QuoteError); return e.code; }
+  };
+  assert.equal(await code([['instrumentSearch', { body: '[]' }]]), 'notfound');
+  assert.equal(await code([['instrumentSearch', { status: 429 }]]), 'quota');
+  assert.equal(await code([['instrumentSearch', { status: 503 }]]), 'server');
+  assert.equal(await code([['instrumentSearch', { status: 403 }]]), 'blocked');
+  assert.equal(await code([['instrumentSearch', { body: '<html>' }]]), 'format');
+  assert.equal(await code([['instrumentSearch', new TypeError('Failed to fetch')]]), 'network');
+  const abort = new Error('aborted'); abort.name = 'AbortError';
+  assert.equal(await code([['instrumentSearch', abort]]), 'timeout');
+  assert.equal(await code([
+    ['instrumentSearch', { body: FIX('euronext-search-psp5.json') }],
+    ['getFullDownloadAjax', { body: 'Date;Open;High;Low;Last;Close\n' }],
+  ]), 'noprice');
+  // instrument mémorisé périmé → nouvelle recherche, puis succès
+  assert.equal(await code([
+    ['getFullDownloadAjax/XX0000000000', { body: 'Date;Open;High;Low;Last;Close\n' }],
+    ['instrumentSearch', { body: FIX('euronext-search-psp5.json') }],
+    ['getFullDownloadAjax/FR0011871128', { body: FIX('euronext-history-psp5.csv') }],
+  ], { isin: 'XX0000000000', mic: 'XPAR' }), 'ok');
+  assert.match(new QuoteError('quota').message, /Trop de demandes/);
+});
+
+test('import : instruments et réglages', () => {
+  const s = Store.sanitize({
+    purchases: [],
+    instruments: { psp5: { isin: 'FR0011871128', mic: 'XPAR', symbol: 'PSP5', name: 'x' }, bad: { isin: '123', mic: 'XPAR' } },
+    settings: { autoRefresh: false },
+    prices: { PSP5: { price: 59.37, date: '2026-09-28', source: 'euronext', at: '2026-09-28T16:17:00.000Z' } },
+  });
+  assert.deepEqual(Object.keys(s.instruments), ['PSP5']);
+  assert.equal(s.settings.autoRefresh, false);
+  assert.equal(s.prices.PSP5.source, 'euronext');
+  assert.equal(s.prices.PSP5.at, '2026-09-28T16:17:00.000Z');
+  assert.equal(Store.defaults().settings.autoRefresh, true);
+});
+
+test('horodatage au format français', () => {
+  const iso = new Date(2026, 8, 28, 18, 7).toISOString();
+  assert.equal(Fmt.dateTime(iso), '28/09/2026 à 18:07');
+  assert.equal(Fmt.dateTime(null), '');
+});
+
+/* ---------- Recherche par nom, réponses parasites (v1.3.1) ---------- */
+const searchItem = (isin, symbol, name, mic = 'XPAR') => ({
+  isin, mic, value: isin,
+  label: `<span class='name'><a href='/en/product/etfs/${isin}-${mic}'>${name}</a></span><span class='symbol'>${symbol}</span><span class='mic'>${mic}</span>`,
+});
+
+test('recherche par nom : jamais de choix automatique, liste de candidats', async () => {
+  // Réponse réelle d'Euronext à « Amundi PEA Monde » : un AUTRE ETF arrive en premier
+  const body = JSON.stringify([
+    searchItem('FR001400S9V0', 'MLUX', 'Amundi PEA Monde Luxe'),
+    searchItem('FR001400U5Q4', 'DCAM', 'AMUNDI PEA MONDE MSCI World UCITS ETF Acc'),
+  ]);
+  try {
+    await Euronext.quote('Amundi PEA Monde', null, fakeFetch([['instrumentSearch', { body }]]));
+    assert.fail('aurait dû demander de choisir');
+  } catch (e) {
+    assert.equal(e.code, 'ambiguous');
+    assert.deepEqual(e.candidates.map((c) => c.symbol), ['MLUX', 'DCAM']);
+  }
+  // le ticker exact, lui, est choisi directement
+  const f = fakeFetch([['instrumentSearch', { body }], ['getFullDownloadAjax/FR001400U5Q4', { body: FIX('euronext-history-psp5.csv') }]]);
+  assert.equal((await Euronext.quote('dcam', null, f)).instrument.isin, 'FR001400U5Q4');
+});
+
+test('recherche : variantes quand le nom complet ne donne rien (S&P)', async () => {
+  const variants = Euronext.queryVariants('Amundi PEA S&P 500 UCITS ETF Acc');
+  assert.equal(variants[0], 'Amundi PEA S&P 500 UCITS ETF Acc');
+  assert.ok(variants.includes('Amundi PEA SP 500'));
+  assert.deepEqual(Euronext.queryVariants('DCAM'), ['DCAM']);
+  // la 1re variante ne donne rien, une suivante trouve le titre → candidats proposés
+  const empty = JSON.stringify([{ value: '', isin: '', mic: '', label: 'See all results' }]);
+  const found = JSON.stringify([searchItem('FR0011871128', 'PSP5', 'Amundi PEA S&amp;P 500 UCITS ETF Acc')]);
+  const f = async (url) => ({ ok: true, status: 200, text: async () => (url.includes('SP%20500') ? found : empty) });
+  await assert.rejects(Euronext.quote('Amundi PEA S&P 500 UCITS ETF Acc', null, f), (e) => {
+    assert.equal(e.code, 'ambiguous');
+    assert.equal(e.candidates[0].symbol, 'PSP5');
+    assert.equal(e.candidates[0].name, 'Amundi PEA S&P 500 UCITS ETF Acc');
+    return true;
+  });
+  // rien du tout → introuvable
+  await assert.rejects(Euronext.quote('XYZ123', null, async () => ({ ok: true, status: 200, text: async () => empty })), { code: 'notfound' });
+});
+
+test('réponse parasite d\'Euronext : on réessaie', async () => {
+  const junk = "Can't open /MIDDLELOGS/EURONEXT/live/wfi_stats_request.2026-09-28.log in AwlLogging::lopen on line 59";
+  let n = 0;
+  const f = async (url) => {
+    n++;
+    const body = n === 1 ? junk : url.includes('instrumentSearch') ? FIX('euronext-search-psp5.json') : FIX('euronext-history-psp5.csv');
+    return { ok: true, status: 200, text: async () => body };
+  };
+  const saved0 = Euronext.RETRY_DELAY_MS;
+  Euronext.RETRY_DELAY_MS = 1;
+  const q = await Euronext.quote('PSP5', null, f);
+  Euronext.RETRY_DELAY_MS = saved0;
+  assert.equal(q.price, 59.37);
+  assert.equal(n, 3, '1 réponse parasite + recherche + historique');
+  // parasite collé devant les données : retiré
+  assert.equal(Euronext.stripJunk(junk + '\n[1]'), '[1]');
+  // toujours parasite → « momentanément indisponible » après RETRIES essais
+  const saved = Euronext.RETRY_DELAY_MS;
+  Euronext.RETRY_DELAY_MS = 1;
+  let calls = 0;
+  await assert.rejects(Euronext.quote('PSP5', null, async () => { calls++; return { ok: true, status: 200, text: async () => junk }; }), { code: 'busy' });
+  assert.equal(calls, Euronext.RETRIES);
+  Euronext.RETRY_DELAY_MS = saved;
+});
+
+test('HTTP 404 : erreur serveur (et non « introuvable »)', async () => {
+  await assert.rejects(Euronext.quote('PSP5', null, fakeFetch([['instrumentSearch', { status: 404 }]])), { code: 'server' });
+});
+
+test('stockage : les anciens choix automatiques non exacts sont oubliés', () => {
+  const s = Store.clean({
+    purchases: [],
+    instruments: {
+      'AMUNDI PEA MONDE': { isin: 'FR001400S9V0', mic: 'XPAR', symbol: 'MLUX', name: 'mauvais choix auto' },
+      'MON ETF': { isin: 'FR001400U5Q4', mic: 'XPAR', symbol: 'DCAM', name: 'choisi', confirmed: true },
+      DCAM: { isin: 'FR001400U5Q4', mic: 'XPAR', symbol: 'DCAM', name: 'exact' },
+    },
+  }).state;
+  assert.deepEqual(Object.keys(s.instruments).sort(), ['DCAM', 'MON ETF']);
+  assert.equal(s.instruments['MON ETF'].confirmed, true);
+});
+
+/* ---------- Simulateur : vrais chiffres et comparaison au taux (v1.4.0) ---------- */
+test('rythme réel du DCA', () => {
+  // 3 achats de janvier à mars : 292,58 € sur 3 mois
+  const pace = Calc.realPace(purchases, '2026-09-28');
+  assert.equal(pace.months, 3);
+  close(pace.total, 292.58);
+  close(pace.monthly, 292.58 / 3);
+  assert.equal(pace.count, 3);
+  assert.equal(pace.since, '2026-01-05');
+  // un seul achat : son montant ; achat futur ignoré ; aucun achat : null
+  assert.equal(Calc.realPace([purchases[0]], '2026-09-28').months, 1);
+  assert.equal(Calc.realPace([{ ...purchases[0], date: '2027-01-01' }], '2026-09-28'), null);
+  assert.equal(Calc.realPace([], '2026-09-28'), null);
+});
+
+test('valeur de mes achats au taux de l\'hypothèse', () => {
+  const one = [{ date: '2025-01-01', ticker: 'DCAM', qty: 100, price: 10, fees: 0 }];
+  // 1 000 € placés 365 jours à 7 % → 1 070 € ; avec 0,2 % de frais → ×(1,07 × 0,998)
+  close(Calc.valueAtRate(one, 7, 0, '2026-01-01'), 1070, 1e-9);
+  close(Calc.valueAtRate(one, 7, 0.2, '2026-01-01'), 1000 * 1.07 * 0.998, 1e-9);
+  // le jour même de l'achat : le prix payé (frais inclus) ; achats postérieurs ignorés
+  close(Calc.valueAtRate(purchases, 7, 0.2, '2026-01-05'), 96.99);
+  // plusieurs achats : chacun capitalise depuis sa propre date
+  const at = '2026-03-05';
+  const expected = purchases.reduce((s, p) => s + Calc.purchaseCost(p) * Math.pow(1 + Calc.netRate(7, 0.2), Dates.daysBetween(Dates.parse(p.date), Dates.parse(at)) / 365), 0);
+  close(Calc.valueAtRate(purchases, 7, 0.2, at), expected, 1e-9);
+  close(Calc.netRate(7, 0.2), 1.07 * 0.998 - 1, 1e-12);
+});
+
+test('simulateur : départ de la valeur actuelle, « versé » = vraiment investi', () => {
+  // 1 100 € de valeur pour 1 000 € investis, 100 €/mois pendant 1 an à 0 %
+  const r = Calc.simulate({ monthly: 100, annualRate: 0, years: 1, initial: 1100, initialInvested: 1000 });
+  close(r.final, 2300);
+  close(r.invested, 2200);
+  close(r.gains, 100);
+  assert.equal(r.points[0].invested, 1000);
+  // sans initialInvested : comportement inchangé
+  close(Calc.simulate({ monthly: 0, annualRate: 0, years: 1, initial: 500 }).invested, 500);
+});
+
+test('import : option « vrais chiffres » du simulateur', () => {
+  assert.equal(Store.sanitize({ purchases: [], sim: { useReal: false } }).sim.useReal, false);
+  assert.equal(Store.sanitize({ purchases: [] }).sim.useReal, true);
+});
+
+test('plus-value hors frais (style courtier) vs nette de frais', () => {
+  // Cas réel BforBank : 1 part à 59,44 €, 2,50 € de frais, cours 59,46 €
+  const pf = Calc.portfolio(
+    [{ date: '2026-09-28', ticker: 'PSP5', qty: 1, price: 59.44, fees: 2.5 }],
+    { PSP5: { price: 59.46, date: '2026-09-29' } });
+  close(pf.pvGross, 0.02);
+  close(pf.pvGrossPct, 0.02 / 59.44);
+  close(pf.positions[0].pruGross, 59.44);
+  close(pf.pv, 0.02 - 2.5);               // -2,48 €
+  close(pf.pvPct, -2.48 / 61.94);          // -4,00 %
+  close(pf.positions[0].pvGross, 0.02);
+});
+
+test('série de performance : par titre et total, hors frais', () => {
+  const buys = [
+    { id: 'a', date: '2026-01-05', ticker: 'DCAM', qty: 10, price: 6.0, fees: 1 },
+    { id: 'b', date: '2026-01-06', ticker: 'PSP5', qty: 1, price: 50, fees: 2 },
+  ];
+  const hist = {
+    DCAM: [['2026-01-05', 6.0], ['2026-01-06', 6.6], ['2026-01-07', 5.4]],
+    PSP5: [['2026-01-06', 50], ['2026-01-07', 55]],
+  };
+  const dcam = Calc.performanceSeries(buys, hist, 'DCAM');
+  assert.equal(dcam.length, 3);
+  close(dcam[0].pct, 0);
+  close(dcam[1].pct, 0.10);           // 66 € pour 60 € payés
+  close(dcam[2].pct, -0.10);          // 54 € pour 60 €
+  close(dcam[2].pv, -6);
+  close(dcam[2].pvNet, -7);           // avec 1 € de frais
+  // total : commence au 1er achat, tous les titres doivent avoir un historique
+  const all = Calc.performanceSeries(buys, hist);
+  assert.equal(all[0].date, '2026-01-05');
+  const last = all[all.length - 1];
+  close(last.value, 54 + 55);
+  close(last.gross, 60 + 50);
+  close(last.pct, (109 - 110) / 110);
+  assert.deepEqual(Calc.performanceSeries(buys, { DCAM: hist.DCAM }), [], 'PSP5 sans historique → pas de total');
+  assert.deepEqual(Calc.performanceSeries(buys, hist, 'XXXX'), []);
+});
+
+test('historiques : dernier cours ajouté, fusion', () => {
+  const h = { PSP5: [['2026-09-28', 59.37]] };
+  const w = Calc.withLatestQuotes(h, { PSP5: { price: 59.46, date: '2026-09-29' }, XXX: { price: 1, date: '2026-09-29' } });
+  assert.deepEqual(w.PSP5, [['2026-09-28', 59.37], ['2026-09-29', 59.46]]);
+  assert.equal(w.XXX, undefined, 'sans historique : pas de courbe');
+  assert.deepEqual(h.PSP5, [['2026-09-28', 59.37]], 'entrée non modifiée');
+  assert.deepEqual(
+    Calc.mergeHistory([['2026-01-01', 1], ['2026-01-03', 3]], [['2026-01-02', 2], ['2026-01-03', 3.5]]),
+    [['2026-01-01', 1], ['2026-01-02', 2], ['2026-01-03', 3.5]]);
+});
+
+test('Euronext : historique depuis le premier achat', async () => {
+  const urls = [];
+  const f = async (url) => {
+    urls.push(url);
+    return { ok: true, status: 200, text: async () => url.includes('instrumentSearch') ? FIX('euronext-search-psp5.json') : FIX('euronext-history-psp5.csv') };
+  };
+  const q = await Euronext.quote('PSP5', null, f, '2026-09-28');
+  assert.equal(q.price, 59.37);
+  assert.ok(q.history.length >= 1);
+  assert.deepEqual(q.history[q.history.length - 1], ['2026-09-28', 59.37]);
+  assert.ok(/startdate=2026-09-2[01]/.test(urls[urls.length - 1]) || /startdate=2026-09-1/.test(urls[urls.length - 1]), 'démarre avant le 1er achat : ' + urls[urls.length - 1]);
+  // sans `since` : pas d'historique (comportement d'avant)
+  assert.deepEqual((await Euronext.quote('PSP5', null, f)).history, []);
+});
+
+test('et si : placement fictif unique (10 000 € sur 1 mois, 1 an, 10 ans)', () => {
+  const rows = Calc.whatIf({ amount: 10000, annualRate: 5, ter: 0, months: [1, 12, 120] });
+  assert.equal(rows.length, 3);
+  // 5 %/an → taux mensuel équivalent 1,05^(1/12) − 1
+  close(rows[0].value, 10000 * Math.pow(1.05, 1 / 12));
+  close(rows[1].value, 10500);
+  close(rows[2].value, 10000 * Math.pow(1.05, 10));
+  close(rows[1].gain, 500);
+  close(rows[1].gainPct, 0.05);
+});
+
+test('et si : taux nul, frais ETF et montant nul', () => {
+  close(Calc.whatIf({ amount: 10000, annualRate: 0, months: [6] })[0].gain, 0);
+  const withTer = Calc.whatIf({ amount: 1000, annualRate: 7, ter: 0.2, months: [120] })[0];
+  close(withTer.value, 1000 * Math.pow(1.07 * 0.998, 10));
+  const zero = Calc.whatIf({ amount: 0, annualRate: 7, months: [12] })[0];
+  assert.equal(zero.value, 0);
+  assert.equal(zero.gainPct, 0);
+});

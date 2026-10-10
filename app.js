@@ -1,0 +1,2394 @@
+/* ==========================================================================
+   Budget & Patrimoine — logique de l'application (partie PEA ; le budget est dans budget.js)
+   --------------------------------------------------------------------------
+   Organisation du fichier :
+     1. Formatage (formats français)
+     2. Calculs purs (PRU, plus-value, simulateur, compteur PEA)
+        → sans DOM, testables avec Node (voir tests/calc.test.js)
+     3. Stockage (localStorage + export / import JSON)
+     4. Fournisseurs de cours (manuel aujourd'hui, API demain)
+     5. Graphiques SVG maison
+     6. Interface
+   ========================================================================== */
+'use strict';
+
+const APP_VERSION = '2.0.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
+
+/* ==========================================================================
+   1. FORMATAGE — euros, dates JJ/MM/AAAA, virgule décimale
+   ========================================================================== */
+const Fmt = (() => {
+  const eur = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' });
+  const eur0 = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
+  const unit = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const num = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 4 });
+  const pct = new Intl.NumberFormat('fr-FR', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const compact = new Intl.NumberFormat('fr-FR', { notation: 'compact', maximumFractionDigits: 1 });
+
+  const sign = (v) => (v > 0 ? '+' : ''); // le signe « − » est déjà ajouté par Intl
+  // Arrondis au centime / au centième de % : évite « −0,00 € » pour −0,001 € (erreurs d'arrondi)
+  const cents = (v) => (Math.abs(v) < 0.005 ? 0 : v);
+  const bp = (r) => (Math.abs(r) < 0.00005 ? 0 : r);
+
+  return {
+    eur: (v) => eur.format(v),
+    eur0: (v) => eur0.format(v),
+    unitPrice: (v) => unit.format(v),
+    num: (v) => num.format(v),
+    /** Valeur pour un champ de saisie : virgule décimale, sans séparateur de milliers. */
+    input: (v) => (v === null || v === undefined || v === '' ? '' : String(v).replace('.', ',')),
+    pct: (ratio) => pct.format(ratio),
+    signedEur: (v) => sign(cents(v)) + eur.format(cents(v)),
+    signedPct: (ratio) => sign(bp(ratio)) + pct.format(bp(ratio)),
+    /** Classe CSS d'une variation : 'pos', 'neg' ou '' (nulle au centime près). */
+    trend: (v) => (cents(v) > 0 ? 'pos' : cents(v) < 0 ? 'neg' : ''),
+    compactEur: (v) => compact.format(v) + ' €',
+    /** 'AAAA-MM-JJ' → 'JJ/MM/AAAA' */
+    date: (iso) => {
+      if (!iso) return '—';
+      const [y, m, d] = iso.split('-');
+      return `${d}/${m}/${y}`;
+    },
+    /** Horodatage ISO → 'JJ/MM/AAAA à HH:MM' (heure locale) */
+    dateTime: (iso) => {
+      const d = new Date(iso);
+      if (!iso || Number.isNaN(d.getTime())) return '';
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} à ${p(d.getHours())}:${p(d.getMinutes())}`;
+    },
+    /** 'AAAA-MM-JJ' → 'mars 2026' (axes des graphiques) */
+    monthYear: (iso) => {
+      const d = Dates.parse(iso);
+      return d.toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' });
+    },
+  };
+})();
+
+/* ==========================================================================
+   Utilitaires de dates (tout en heure locale, sans décalage de fuseau)
+   ========================================================================== */
+const Dates = {
+  /** 'AAAA-MM-JJ' → Date locale à minuit. */
+  parse(iso) {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d);
+  },
+  /** Date → 'AAAA-MM-JJ' */
+  toISO(date) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  },
+  today() { return Dates.toISO(new Date()); },
+  isValidISO(iso) {
+    if (typeof iso !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+    return Dates.toISO(Dates.parse(iso)) === iso;
+  },
+  addYears(date, n) {
+    const r = new Date(date.getFullYear() + n, date.getMonth(), date.getDate());
+    // 29 février + n ans → 28 février si l'année n'est pas bissextile
+    if (r.getMonth() !== date.getMonth()) r.setDate(0);
+    return r;
+  },
+  daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); },
+  /** Nombre de jours entiers entre deux dates (b − a). */
+  daysBetween(a, b) {
+    return Math.round((Date.UTC(b.getFullYear(), b.getMonth(), b.getDate()) -
+                       Date.UTC(a.getFullYear(), a.getMonth(), a.getDate())) / 86400000);
+  },
+  /** Écart b − a en années / mois / jours (b ≥ a). */
+  diffYMD(a, b) {
+    let years = b.getFullYear() - a.getFullYear();
+    let months = b.getMonth() - a.getMonth();
+    let days = b.getDate() - a.getDate();
+    if (days < 0) {
+      months -= 1;
+      // jours du mois précédant le mois de b
+      const pm = b.getMonth() === 0 ? 11 : b.getMonth() - 1;
+      const py = b.getMonth() === 0 ? b.getFullYear() - 1 : b.getFullYear();
+      days += Dates.daysInMonth(py, pm);
+    }
+    if (months < 0) { years -= 1; months += 12; }
+    return { years, months, days };
+  },
+};
+
+/* ==========================================================================
+   2. CALCULS PURS
+   ========================================================================== */
+const Calc = {
+  /**
+   * Convertit une saisie française en nombre : « 1 234,56 » → 1234.56.
+   * Renvoie NaN si la saisie est invalide, 0 si elle est vide et allowEmpty.
+   */
+  parseNumber(value, allowEmpty = false) {
+    if (typeof value === 'number') return value;
+    const s = String(value ?? '').replace(/[\s  €%]/g, '').replace(',', '.');
+    if (s === '') return allowEmpty ? 0 : NaN;
+    if (!/^-?\d*\.?\d+$|^-?\d+\.$/.test(s)) return NaN;
+    return Number(s);
+  },
+
+  /**
+   * Normalise un ticker : « dcam » → « DCAM », « DCAM.PA » → « DCAM »,
+   * ISIN connu → ticker (pour retrouver le cours automatique).
+   */
+  normTicker(t) {
+    const s = String(t || '').trim().toUpperCase().replace(/\s+/g, ' ');
+    const ALIASES = { FR001400U5Q4: 'DCAM' }; // Amundi PEA Monde (MSCI World)
+    return ALIASES[s] || s.replace(/\.PA$/, '');
+  },
+
+  /** Coût total d'un achat (frais inclus). */
+  purchaseCost(p) { return p.qty * p.price + (p.fees || 0); },
+
+  /**
+   * Agrège les achats par titre et calcule la performance.
+   * @param {Array} purchases  [{date, ticker, qty, price, fees}]
+   * @param {Object} prices    { TICKER: { price, date } } — cours actuels
+   * PRU = (Σ parts × prix + Σ frais) / Σ parts  (frais inclus, convention courante)
+   * Si aucun cours n'est saisi pour un titre, on valorise au dernier prix d'achat.
+   */
+  portfolio(purchases, prices = {}) {
+    const byTicker = new Map();
+    for (const p of purchases) {
+      const t = Calc.normTicker(p.ticker);
+      if (!byTicker.has(t)) byTicker.set(t, { ticker: t, qty: 0, gross: 0, fees: 0, lastDate: '', lastPrice: 0, count: 0 });
+      const pos = byTicker.get(t);
+      pos.qty += p.qty;
+      pos.gross += p.qty * p.price;
+      pos.fees += p.fees || 0;
+      pos.count += 1;
+      if (p.date >= pos.lastDate) { pos.lastDate = p.date; pos.lastPrice = p.price; }
+    }
+
+    const positions = [...byTicker.values()].map((pos) => {
+      const invested = pos.gross + pos.fees;
+      const quote = prices[pos.ticker];
+      const hasQuote = !!(quote && quote.price > 0);
+      const currentPrice = hasQuote ? quote.price : pos.lastPrice;
+      const value = pos.qty * currentPrice;
+      const pv = value - invested;
+      return {
+        ...pos,
+        invested,
+        pru: pos.qty > 0 ? invested / pos.qty : 0,
+        currentPrice,
+        hasQuote,
+        quoteDate: hasQuote ? quote.date : null,
+        value,
+        pv,
+        pvPct: invested > 0 ? pv / invested : 0,
+        // Style courtier : hors frais (PRU = prix d'achat brut)
+        pruGross: pos.qty > 0 ? pos.gross / pos.qty : 0,
+        pvGross: value - pos.gross,
+        pvGrossPct: pos.gross > 0 ? (value - pos.gross) / pos.gross : 0,
+      };
+    }).sort((a, b) => b.invested - a.invested);
+
+    const invested = positions.reduce((s, p) => s + p.invested, 0);
+    const value = positions.reduce((s, p) => s + p.value, 0);
+    const qty = positions.reduce((s, p) => s + p.qty, 0);
+    const fees = positions.reduce((s, p) => s + p.fees, 0);
+    const pv = value - invested;
+    const gross = positions.reduce((s, p) => s + p.gross, 0);
+    return {
+      positions,
+      invested,
+      value,
+      fees,
+      gross,
+      pv,
+      pvPct: invested > 0 ? pv / invested : 0,
+      pvGross: value - gross,
+      pvGrossPct: gross > 0 ? (value - gross) / gross : 0,
+      qty,
+      // Un PRU global n'a de sens que pour un seul titre
+      pru: positions.length === 1 ? positions[0].pru : null,
+      missingQuotes: positions.filter((p) => !p.hasQuote).map((p) => p.ticker),
+    };
+  },
+
+  /** Série des versements cumulés (frais inclus), un point par date d'achat. */
+  cumulativeSeries(purchases) {
+    const byDate = new Map();
+    for (const p of purchases) byDate.set(p.date, (byDate.get(p.date) || 0) + Calc.purchaseCost(p));
+    let total = 0;
+    return [...byDate.keys()].sort().map((date) => {
+      total += byDate.get(date);
+      return { date, total };
+    });
+  },
+
+  /** Bornes des paramètres du simulateur (au-delà, le calcul n'a pas de sens). */
+  validSim(key, v) {
+    if (!Number.isFinite(v)) return false;
+    switch (key) {
+      case 'monthly': case 'initial': return v >= 0;
+      case 'years': return v >= 0 && v <= 80;
+      case 'rate': return v > -100 && v <= 100;
+      case 'ter': return v >= 0 && v < 100;
+      default: return true;
+    }
+  },
+
+  /**
+   * Simulateur de DCA à intérêts composés.
+   * - taux mensuel équivalent : (1 + r_net)^(1/12) − 1
+   * - r_net = (1 + rendement) × (1 − frais ETF) − 1
+   * - versement en fin de mois
+   * @returns {{final, invested, gains, gainsShare, points:[{month, invested, value}]}}
+   */
+  simulate({ monthly = 0, annualRate = 0, years = 0, initial = 0, ter = 0, initialInvested = null }) {
+    const net = (1 + annualRate / 100) * (1 - ter / 100) - 1;
+    const i = Math.pow(1 + net, 1 / 12) - 1;
+    const n = Math.max(0, Math.round(years * 12));
+    // Déjà investi au départ (sans les gains passés) ; par défaut = capital de départ
+    const base = initialInvested === null ? initial : initialInvested;
+    let value = initial;
+    const points = [{ month: 0, invested: base, value }];
+    for (let m = 1; m <= n; m++) {
+      value = value * (1 + i) + monthly;
+      points.push({ month: m, invested: base + monthly * m, value });
+    }
+    const invested = base + monthly * n;
+    const gains = value - invested;
+    return {
+      final: value,
+      invested,
+      gains,
+      gainsShare: value > 0 ? gains / value : 0,
+      monthlyRate: i,
+      points,
+    };
+  },
+
+  /**
+   * « Et si je plaçais X € ? » (argent fictif, un seul versement, rien d'enregistré).
+   * Valeur du placement après chacune des durées demandées (en mois).
+   * @returns {{months, value, gain, gainPct}[]}
+   */
+  whatIf({ amount = 0, annualRate = 0, ter = 0, months = [] }) {
+    return months.map((m) => {
+      const r = Calc.simulate({ monthly: 0, annualRate, years: m / 12, initial: amount, ter });
+      return { months: m, value: r.final, gain: r.gains, gainPct: amount > 0 ? r.gains / amount : 0 };
+    });
+  },
+
+  /**
+   * Rythme réel du DCA : total investi (frais inclus) divisé par le nombre
+   * de mois entre le premier et le dernier achat (bornes incluses).
+   * @returns {{monthly, months, total, count, since}} ou null sans achat passé
+   */
+  realPace(purchases, todayISO = Dates.today()) {
+    const past = purchases.filter((p) => p.date <= todayISO).sort((a, b) => a.date.localeCompare(b.date));
+    if (!past.length) return null;
+    const first = Dates.parse(past[0].date);
+    const last = Dates.parse(past[past.length - 1].date);
+    const months = (last.getFullYear() - first.getFullYear()) * 12 + last.getMonth() - first.getMonth() + 1;
+    const total = past.reduce((sum, p) => sum + Calc.purchaseCost(p), 0);
+    return { monthly: total / months, months, total, count: past.length, since: past[0].date };
+  },
+
+  /** Rendement annuel net de frais : (1 + taux) × (1 − frais) − 1. */
+  netRate(annualRate, ter = 0) {
+    return (1 + annualRate / 100) * (1 - ter / 100) - 1;
+  },
+
+  /**
+   * Valeur qu'auraient VOS achats à une date s'ils avaient rapporté
+   * exactement le taux (net de frais), chacun depuis sa propre date.
+   * Les frais de courtage sont inclus au départ (comme dans la réalité).
+   */
+  valueAtRate(purchases, annualRate, ter, atISO) {
+    const net = Calc.netRate(annualRate, ter);
+    const at = Dates.parse(atISO);
+    return purchases
+      .filter((p) => p.date <= atISO)
+      .reduce((sum, p) => sum + Calc.purchaseCost(p) * Math.pow(1 + net, Dates.daysBetween(Dates.parse(p.date), at) / 365), 0);
+  },
+
+  /**
+   * Compteur des 5 ans du PEA (après 5 ans : exonération d'impôt sur le
+   * revenu des gains, seuls les prélèvements sociaux restent dus).
+   */
+  peaCountdown(openingISO, todayISO = Dates.today()) {
+    const open = Dates.parse(openingISO);
+    const today = Dates.parse(todayISO);
+    const target = Dates.addYears(open, 5);
+    const totalDays = Dates.daysBetween(open, target);
+    const elapsed = Math.min(Math.max(Dates.daysBetween(open, today), 0), totalDays);
+    const reached = today >= target;
+    return {
+      targetISO: Dates.toISO(target),
+      reached,
+      remaining: reached ? { years: 0, months: 0, days: 0 } : Dates.diffYMD(today, target),
+      daysLeft: reached ? 0 : Dates.daysBetween(today, target),
+      progress: totalDays > 0 ? elapsed / totalDays : 1,
+    };
+  },
+
+  /** Jauge du plafond de versements. */
+  ceiling(invested, cap = PEA_CEILING) {
+    return {
+      used: invested,
+      remaining: Math.max(cap - invested, 0),
+      progress: Math.min(invested / cap, 1),
+    };
+  },
+
+  /**
+   * Versements et cash : le plafond PEA porte sur l'argent versé sur le
+   * compte, pas sur les achats. Sans versement saisi, on se rabat sur les
+   * achats (frais inclus).
+   */
+  deposits(deposits, purchases) {
+    const spent = purchases.reduce((s, p) => s + Calc.purchaseCost(p), 0);
+    const total = deposits.reduce((s, d) => s + d.amount, 0);
+    const hasDeposits = deposits.length > 0;
+    return {
+      hasDeposits,
+      total,
+      spent,
+      base: hasDeposits ? total : spent, // montant compté pour le plafond
+      cash: hasDeposits ? total - spent : null,
+    };
+  },
+
+  /**
+   * Calculateur « prochain achat » : nombre de parts entières achetables
+   * avec un montant donné, frais de courtage déduits.
+   */
+  buyPlan(amount, price, fees = 0) {
+    if (!(amount > 0) || !(price > 0) || fees < 0) return null;
+    const qty = Math.max(Math.floor((amount - fees) / price + 1e-9), 0);
+    const cost = qty > 0 ? qty * price + fees : 0;
+    return { qty, cost, left: amount - cost };
+  },
+
+  /**
+   * Taux de rendement interne annualisé (TRI / XIRR).
+   * @param flows [{date: 'AAAA-MM-JJ', amount}] — négatif = argent investi,
+   *              positif = argent récupéré (ou valeur actuelle).
+   * @returns taux annuel (0.07 = 7 %) ou null si incalculable.
+   * Résolution par dichotomie : lente mais toujours stable.
+   */
+  xirr(flows) {
+    if (flows.length < 2) return null;
+    const t0 = Dates.parse(flows[0].date);
+    const pts = flows.map((f) => ({ t: Dates.daysBetween(t0, Dates.parse(f.date)) / 365, a: f.amount }));
+    if (!pts.some((p) => p.a < 0) || !pts.some((p) => p.a > 0)) return null;
+    const npv = (r) => pts.reduce((s, p) => s + p.a / Math.pow(1 + r, p.t), 0);
+    let lo = -0.9999, hi = 10;
+    let flo = npv(lo), fhi = npv(hi);
+    if (!Number.isFinite(flo) || !Number.isFinite(fhi) || flo * fhi > 0) return null;
+    for (let k = 0; k < 200; k++) {
+      const mid = (lo + hi) / 2;
+      const fm = npv(mid);
+      if (Math.abs(fm) < 1e-9 || hi - lo < 1e-10) return mid;
+      if (fm * flo < 0) { hi = mid; fhi = fm; } else { lo = mid; flo = fm; }
+    }
+    return (lo + hi) / 2;
+  },
+
+  /** TRI du portefeuille : achats (sorties) + valeur actuelle (entrée) à la date du jour. */
+  portfolioXirr(purchases, value, todayISO = Dates.today()) {
+    if (!purchases.length || !(value > 0)) return null;
+    const flows = purchases
+      .map((p) => ({ date: p.date, amount: -Calc.purchaseCost(p) }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const days = Dates.daysBetween(Dates.parse(flows[0].date), Dates.parse(todayISO));
+    return { rate: Calc.xirr([...flows, { date: todayISO, amount: value }]), days };
+  },
+
+  /**
+   * Série « valeur du portefeuille vs versements » à partir de l'historique
+   * des cours. histories = { TICKER: [['AAAA-MM-JJ', clôture], ...] } triés.
+   * Un point par jour de cotation depuis le premier achat. Renvoie [] si un
+   * titre détenu n'a pas d'historique.
+   */
+  valueSeries(purchases, histories) {
+    if (!purchases.length) return [];
+    const sorted = purchases.slice().sort((a, b) => a.date.localeCompare(b.date));
+    const tickers = [...new Set(sorted.map((p) => Calc.normTicker(p.ticker)))];
+    if (tickers.some((t) => !histories[t] || !histories[t].length)) return [];
+    const start = sorted[0].date;
+    const dates = [...new Set(tickers.flatMap((t) => histories[t].map((h) => h[0])))]
+      .filter((d) => d >= start)
+      .sort();
+
+    const out = [];
+    const idx = Object.fromEntries(tickers.map((t) => [t, -1]));
+    const qty = Object.fromEntries(tickers.map((t) => [t, 0]));
+    let pi = 0;
+    let invested = 0;
+    let gross = 0; // hors frais
+    for (const d of dates) {
+      while (pi < sorted.length && sorted[pi].date <= d) {
+        const p = sorted[pi++];
+        qty[Calc.normTicker(p.ticker)] += p.qty;
+        invested += Calc.purchaseCost(p);
+        gross += p.qty * p.price;
+      }
+      let value = 0;
+      let ok = true;
+      for (const t of tickers) {
+        const h = histories[t];
+        while (idx[t] + 1 < h.length && h[idx[t] + 1][0] <= d) idx[t]++;
+        if (qty[t] > 0) {
+          if (idx[t] < 0) { ok = false; break; }
+          value += qty[t] * h[idx[t]][1];
+        }
+      }
+      if (ok) out.push({ date: d, invested, gross, value });
+    }
+    return out;
+  },
+
+  /**
+   * Performance personnelle dans le temps : plus-value latente (hors frais,
+   * comme le courtier) rapportée à ce qui a été payé pour les parts détenues
+   * à chaque date. ticker = un seul titre, null = tout le portefeuille
+   * (alors chaque titre détenu doit avoir un historique, sinon []).
+   * @returns [{date, gross, invested, value, pv, pct, pvNet, pctNet}]
+   */
+  performanceSeries(purchases, histories, ticker = null) {
+    const subset = ticker ? purchases.filter((p) => Calc.normTicker(p.ticker) === ticker) : purchases;
+    return Calc.valueSeries(subset, histories).map((pt) => ({
+      ...pt,
+      pv: pt.value - pt.gross,
+      pct: pt.gross > 0 ? (pt.value - pt.gross) / pt.gross : 0,
+      pvNet: pt.value - pt.invested,
+      pctNet: pt.invested > 0 ? (pt.value - pt.invested) / pt.invested : 0,
+    }));
+  },
+
+  /**
+   * Historiques + dernier cours connu (Euronext ou saisi) ajouté comme dernier
+   * point s'il est plus récent : la courbe finit sur le chiffre de la carte.
+   */
+  withLatestQuotes(histories, prices) {
+    const out = {};
+    for (const [t, h] of Object.entries(histories || {})) out[t] = h;
+    for (const [t, q] of Object.entries(prices || {})) {
+      if (!(q && q.price > 0 && q.date)) continue;
+      const h = out[t];
+      if (!h || !h.length) continue; // pas d'historique : pas de courbe
+      const last = h[h.length - 1];
+      if (q.date > last[0]) out[t] = [...h, [q.date, q.price]];
+      else if (q.date === last[0] && q.price !== last[1]) out[t] = [...h.slice(0, -1), [q.date, q.price]];
+    }
+    return out;
+  },
+
+  /** Fusionne deux historiques [[date, clôture]] : la source `b` l'emporte à date égale. */
+  mergeHistory(a = [], b = []) {
+    const m = new Map(a.map((h) => [h[0], h[1]]));
+    for (const h of b) m.set(h[0], h[1]);
+    return [...m.entries()].sort((x, y) => x[0].localeCompare(y[0]));
+  },
+};
+
+/* ==========================================================================
+   3. STOCKAGE — localStorage + export / import JSON
+   ========================================================================== */
+const Store = {
+  KEY: 'budget-patrimoine:pea:v1', // clés distinctes de l'appli d'origine (même navigateur = mêmes données sinon)
+
+  defaults() {
+    return {
+      version: 1,
+      openingDate: Dates.today(),
+      purchases: [],            // [{id, date, ticker, qty, price, fees}]
+      deposits: [],             // versements sur le PEA [{id, date, amount}]
+      prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
+      instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
+      settings: { autoRefresh: true }, // actualisation auto des cours 1×/jour à l'ouverture
+      lastAutoRefresh: null,    // date de la dernière actualisation automatique
+      sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, useReal: true }, // useReal : partir de mes vrais chiffres
+      plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
+      lastExport: null,         // date du dernier export JSON
+      theme: 'dark',
+    };
+  },
+
+  BACKUP_KEY: 'budget-patrimoine:pea:v1:secours',
+  loadIssues: 0, // lignes ignorées au dernier chargement (affiché à l'utilisateur)
+
+  /**
+   * Charge les données. Une ligne abîmée est ignorée (et non plus toute la
+   * sauvegarde) ; dans ce cas, l'original est d'abord copié sous BACKUP_KEY
+   * pour ne jamais rien perdre.
+   */
+  load() {
+    let raw = null;
+    try {
+      raw = localStorage.getItem(Store.KEY);
+      if (!raw) return Store.defaults();
+      const { state, dropped } = Store.clean(JSON.parse(raw));
+      Store.loadIssues = dropped;
+      if (dropped) Store.keepBackup(raw);
+      return state;
+    } catch (e) {
+      console.warn('Lecture des données impossible, copie de secours conservée.', e);
+      Store.loadIssues = -1;
+      if (raw) Store.keepBackup(raw);
+      return Store.defaults();
+    }
+  },
+
+  keepBackup(raw) {
+    try { localStorage.setItem(Store.BACKUP_KEY, raw); } catch (e) { /* quota */ }
+  },
+
+  save(state) {
+    try {
+      localStorage.setItem(Store.KEY, JSON.stringify(state));
+    } catch (e) {
+      console.error('Sauvegarde impossible', e);
+    }
+  },
+
+  /** Import d'un fichier : strict, la moindre ligne invalide refuse le fichier. */
+  sanitize(data) {
+    const { state, errors } = Store.clean(data);
+    if (errors.length) throw new Error(errors[0]);
+    return state;
+  },
+
+  /**
+   * Valide et nettoie des données. Les lignes invalides sont écartées et
+   * listées dans errors ; dropped = leur nombre.
+   */
+  clean(data) {
+    if (!data || typeof data !== 'object' || !Array.isArray(data.purchases)) {
+      throw new Error('Fichier invalide : liste des achats absente.');
+    }
+    const def = Store.defaults();
+    const errors = [];
+    const ids = new Set();
+    const uniqueId = (id) => {
+      let v = id ? String(id) : Store.newId();
+      if (ids.has(v)) v = Store.newId(); // identifiants en double : on en recrée un
+      ids.add(v);
+      return v;
+    };
+    const num = (v) => (typeof v === 'string' ? Calc.parseNumber(v) : Number(v));
+    const finite = (v) => Number.isFinite(v);
+
+    const purchases = [];
+    data.purchases.forEach((p, idx) => {
+      const clean = {
+        id: '',
+        date: String(p && p.date),
+        ticker: Calc.normTicker(p && p.ticker),
+        qty: num(p && p.qty),
+        price: num(p && p.price),
+        fees: p && p.fees !== undefined && p.fees !== null && p.fees !== '' ? num(p.fees) : 0,
+      };
+      if (!Dates.isValidISO(clean.date) || !clean.ticker || !(clean.qty > 0) || !(clean.price > 0) ||
+          !(clean.fees >= 0) || ![clean.qty, clean.price, clean.fees].every(finite)) {
+        errors.push(`Achat n°${idx + 1} invalide.`);
+        return;
+      }
+      clean.id = uniqueId(p.id);
+      purchases.push(clean);
+    });
+    const deposits = [];
+    (Array.isArray(data.deposits) ? data.deposits : []).forEach((d, idx) => {
+      const clean = { id: '', date: String(d && d.date), amount: num(d && d.amount) };
+      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0) || !finite(clean.amount)) {
+        errors.push(`Versement n°${idx + 1} invalide.`);
+        return;
+      }
+      clean.id = uniqueId(d.id);
+      deposits.push(clean);
+    });
+    const prices = {};
+    for (const [t, q] of Object.entries(data.prices && typeof data.prices === 'object' ? data.prices : {})) {
+      const price = num(q && q.price);
+      if (price > 0 && finite(price)) {
+        prices[Calc.normTicker(t)] = {
+          price,
+          date: Dates.isValidISO(q.date) ? q.date : '',
+          source: ['auto', 'euronext'].includes(q.source) ? q.source : 'manuel',
+          at: typeof q.at === 'string' && !Number.isNaN(Date.parse(q.at)) ? q.at : null,
+        };
+      }
+    }
+    // Réglages : chaque valeur doit être un nombre valide, sinon valeur par défaut
+    const pickNumbers = (src, defaults, ok) => {
+      const out = { ...defaults };
+      for (const k of Object.keys(defaults)) {
+        const v = num(src && src[k]);
+        if (finite(v) && ok(k, v)) out[k] = v;
+      }
+      return out;
+    };
+    const instruments = {};
+    for (const [t, ins] of Object.entries(data.instruments && typeof data.instruments === 'object' ? data.instruments : {})) {
+      const tk = Calc.normTicker(t);
+      if (!ins || !Euronext.validIsin(ins.isin) || !/^[A-Z]{4}$/.test(ins.mic)) continue;
+      const symbol = String(ins.symbol || '').toUpperCase();
+      // Choix automatique qui ne correspond pas exactement (ancienne version) : on le refera
+      if (!ins.confirmed && symbol !== tk && ins.isin !== tk) continue;
+      instruments[tk] = { isin: ins.isin, mic: ins.mic, symbol, name: String(ins.name || ''), confirmed: !!ins.confirmed };
+    }
+    const { useReal: _useReal, ...simNumbers } = def.sim;
+    const sim = { ...pickNumbers(data.sim, simNumbers, (k, v) => Calc.validSim(k, v)), useReal: !(data.sim && data.sim.useReal === false) };
+    const plan = pickNumbers(data.plan, def.plan, (k, v) => (k === 'amount' ? v > 0 : v >= 0));
+    return {
+      state: {
+        version: 1,
+        openingDate: Dates.isValidISO(data.openingDate) ? data.openingDate : def.openingDate,
+        purchases,
+        deposits,
+        prices,
+        instruments,
+        settings: { autoRefresh: !(data.settings && data.settings.autoRefresh === false) },
+        lastAutoRefresh: Dates.isValidISO(data.lastAutoRefresh) ? data.lastAutoRefresh : null,
+        sim,
+        plan,
+        lastExport: Dates.isValidISO(data.lastExport) ? data.lastExport : null,
+        theme: data.theme === 'light' ? 'light' : 'dark',
+      },
+      errors,
+      dropped: errors.length,
+    };
+  },
+
+  newId() {
+    return (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : Date.now().toString(36) + Math.random().toString(36).slice(2);
+  },
+};
+
+/* ==========================================================================
+   4. FOURNISSEURS DE COURS
+   --------------------------------------------------------------------------
+   Interface d'un fournisseur :
+     { id, label, auto, async load() → { quotes: {TICKER: {price, date}},
+                                          histories: {TICKER: [[date, clôture], ...]} } | null }
+   Le fournisseur actif est ACTIVE_PROVIDER. La saisie manuelle reste
+   toujours possible et prime sur un cours automatique plus ancien.
+   ========================================================================== */
+
+/**
+ * Où lire data/prices.json (mis à jour chaque soir de semaine par la
+ * GitHub Action .github/workflows/prices.yml).
+ * Sur GitHub Pages, on lit d'abord le fichier brut du dépôt (à jour dès le
+ * commit, sans attendre la republication du site), puis la copie du site.
+ */
+function priceUrls(loc = (typeof location !== 'undefined' ? location : null)) {
+  const urls = [];
+  if (loc && /\.github\.io$/.test(loc.hostname)) {
+    const owner = loc.hostname.split('.')[0];
+    const repo = loc.pathname.split('/').filter(Boolean)[0];
+    if (repo) urls.push(`https://raw.githubusercontent.com/${owner}/${repo}/main/data/prices.json`);
+  }
+  urls.push('data/prices.json');
+  return urls;
+}
+
+/** Valide le contenu de prices.json et le met au format attendu par l'appli. */
+function parsePricesFile(json) {
+  if (!json || typeof json !== 'object' || !json.quotes) return null;
+  const quotes = {};
+  const histories = {};
+  for (const [t, q] of Object.entries(json.quotes)) {
+    const ticker = Calc.normTicker(t);
+    if (q && Number(q.price) > 0 && Dates.isValidISO(q.date)) quotes[ticker] = { price: Number(q.price), date: q.date };
+    if (q && Array.isArray(q.history)) {
+      histories[ticker] = q.history
+        .filter((h) => Array.isArray(h) && Dates.isValidISO(h[0]) && Number(h[1]) > 0)
+        .map((h) => [h[0], Number(h[1])])
+        .sort((a, b) => a[0].localeCompare(b[0]));
+    }
+  }
+  return { quotes, histories, updatedAt: json.updatedAt || null };
+}
+
+const PriceProviders = {
+  manual: {
+    id: 'manuel',
+    label: 'Saisie manuelle',
+    auto: false,
+    async load() { return null; },
+  },
+
+  /** Cours de clôture publiés par la GitHub Action dans data/prices.json. */
+  githubAction: {
+    id: 'auto',
+    label: 'Clôture quotidienne (GitHub Action)',
+    auto: true,
+    async load() {
+      for (const url of priceUrls()) {
+        try {
+          const r = await fetch(url, { cache: 'no-store' });
+          if (!r.ok) continue;
+          const parsed = parsePricesFile(await r.json());
+          if (parsed) return parsed;
+        } catch (e) { /* hors ligne ou fichier absent : on essaie l'URL suivante */ }
+      }
+      return null;
+    },
+  },
+};
+const ACTIVE_PROVIDER = PriceProviders.githubAction;
+
+/**
+ * Fusionne des cours automatiques dans les cours enregistrés.
+ * Un cours auto remplace le cours stocké s'il est plus récent, ou si le cours
+ * stocké vient lui-même du fournisseur auto. Un cours saisi à la main le même
+ * jour ou plus tard est conservé.
+ * @returns nombre de cours mis à jour
+ */
+function mergeQuotes(prices, quotes, source = 'auto', at = null) {
+  let n = 0;
+  for (const [t, q] of Object.entries(quotes)) {
+    const cur = prices[t];
+    if (!cur || q.date > cur.date || (cur.source === source && (q.date !== cur.date || q.price !== cur.price))) {
+      prices[t] = { price: q.price, date: q.date, source, at: q.at || at || null };
+      n++;
+    }
+  }
+  return n;
+}
+
+/* ==========================================================================
+   4 bis. COURS EN DIRECT — EURONEXT
+   --------------------------------------------------------------------------
+   Pourquoi Euronext ? C'est la place de cotation des ETF PEA (Paris), et deux
+   de ses points d'accès publics, ceux qu'utilise son propre site, sont
+   appelables depuis le navigateur (en-tête CORS « * »), sans clé ni proxy :
+     1. recherche  : /en/instrumentSearch/searchJSON?q=PSP5  → ISIN + place (MIC)
+     2. historique : /en/ajax/AwlHistoricalPrice/getFullDownloadAjax/<ISIN>-<MIC>
+                     ?format=csv…  → CSV des dernières séances (dernier cours)
+   Yahoo Finance et Stooq, eux, refusent les appels depuis une page web (CORS)
+   et les proxys CORS gratuits sont en panne ou payants (testés en 09/2026).
+   Ces points d'accès ne sont pas une API officielle : s'ils changent, seule
+   cette section est à adapter ; l'appli retombe entre-temps sur le cours de
+   clôture de la GitHub Action, puis sur la saisie manuelle.
+   ========================================================================== */
+
+/** Erreur de récupération de cours, avec un code pour choisir le message. */
+class QuoteError extends Error {
+  constructor(code, detail) {
+    super(QuoteError.MESSAGES[code] || detail || 'Erreur inconnue');
+    this.code = code;
+    this.detail = detail || '';
+  }
+}
+QuoteError.MESSAGES = {
+  offline: 'Pas de connexion internet.',
+  timeout: 'Euronext ne répond pas (délai dépassé).',
+  network: 'Euronext est injoignable pour le moment.',
+  notfound: 'Titre introuvable sur Euronext.',
+  ambiguous: 'Plusieurs titres correspondent : choisissez le bon.',
+  noprice: 'Aucun cours récent publié par Euronext pour ce titre.',
+  quota: 'Trop de demandes envoyées à Euronext : réessayez dans quelques minutes.',
+  blocked: 'Euronext refuse l\'accès pour le moment (protection anti-robots ?).',
+  server: 'Euronext a renvoyé une erreur : réessayez plus tard.',
+  format: 'Réponse d\'Euronext illisible (format modifié ?).',
+  busy: 'Euronext est momentanément indisponible : réessayez dans un instant.',
+};
+
+const Euronext = {
+  BASE: 'https://live.euronext.com',
+  TIMEOUT_MS: 10000,
+  RETRIES: 4,             // essais quand Euronext renvoie sa ligne parasite
+  RETRY_DELAY_MS: 500,    // attente avant le 2e essai, doublée ensuite (0,5 s, 1 s, 2 s)
+
+  validIsin(v) { return typeof v === 'string' && /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(v); },
+
+  /**
+   * Appel HTTP avec délai maximal et erreurs traduites en QuoteError.
+   * Euronext renvoie parfois, au lieu des données, une ligne de journal
+   * parasite (« Can't open /MIDDLELOGS/… ») : on la retire, et si rien
+   * d'autre n'est arrivé, on réessaie (jusqu'à RETRIES fois, attente croissante :
+   * constaté en réel, le raté peut durer plus d'une seconde).
+   */
+  async get(url, fetchFn = fetch) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) throw new QuoteError('offline');
+    for (let attempt = 1; ; attempt++) {
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ctrl && setTimeout(() => ctrl.abort(), Euronext.TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetchFn(url, { cache: 'no-store', signal: ctrl && ctrl.signal });
+      } catch (e) {
+        throw new QuoteError(e && e.name === 'AbortError' ? 'timeout' : 'network', e && e.message);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (res.status === 429) throw new QuoteError('quota');
+      if (res.status === 401 || res.status === 403) throw new QuoteError('blocked', 'HTTP ' + res.status);
+      if (!res.ok) throw new QuoteError('server', 'HTTP ' + res.status);
+      const text = Euronext.stripJunk(await res.text());
+      if (text.trim()) return text;
+      if (attempt >= Euronext.RETRIES) throw new QuoteError('busy', 'réponse vide ou parasite');
+      await new Promise((ok) => setTimeout(ok, Euronext.RETRY_DELAY_MS * 2 ** (attempt - 1)));
+    }
+  },
+
+  /** Retire la ligne de journal parasite qu'Euronext insère parfois. */
+  stripJunk(text) {
+    return String(text || '').replace(/^﻿/, '').replace(/^Can't open [^\n]*(\n|$)/i, '');
+  },
+
+  /** Lit la réponse de la recherche : liste d'instruments {isin, mic, symbol, name}. */
+  parseSearch(json) {
+    if (!Array.isArray(json)) return [];
+    const decode = (h) => String(h || '').replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&#0?39;|&apos;/g, "'").trim();
+    const seen = new Set();
+    return json
+      .filter((it) => it && Euronext.validIsin(it.isin) && /^[A-Z]{4}$/.test(it.mic))
+      .map((it) => {
+        const label = String(it.label || '');
+        const sym = (label.match(/class='symbol'>([^<]+)</) || [])[1] || '';
+        const name = (label.match(/<a [^>]*>([^<]+)<\/a>/) || [])[1] || it.name || '';
+        return { isin: it.isin, mic: it.mic, symbol: decode(sym).toUpperCase(), name: decode(name) };
+      })
+      .filter((it) => !seen.has(it.isin + it.mic) && seen.add(it.isin + it.mic))
+      .sort((a, b) => (b.mic === 'XPAR') - (a.mic === 'XPAR')); // Paris d'abord
+  },
+
+  /** Instrument dont le ticker ou l'ISIN est exactement la saisie (Paris en priorité), sinon null. */
+  exactMatch(candidates, query) {
+    const q = String(query || '').trim().toUpperCase();
+    return candidates.find((c) => c.symbol === q || c.isin === q) || null;
+  },
+
+  /**
+   * Instrument exactement désigné par la saisie (ticker ou ISIN), Paris en
+   * priorité. Une recherche par nom ne choisit JAMAIS toute seule : « Amundi
+   * PEA Monde » renvoie d'abord un autre ETF (MLUX) — l'utilisateur confirme.
+   */
+  pickInstrument(json, query) {
+    return Euronext.exactMatch(Euronext.parseSearch(json), query);
+  },
+
+  /**
+   * Variantes d'une saisie pour la recherche : Euronext abîme « & » (S&P → 0
+   * résultat) et ne trouve pas toujours un nom complet.
+   */
+  queryVariants(query) {
+    const q = String(query || '').trim();
+    const clean = (v) => v.replace(/[()[\],.;:/+'"«»-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const core = (v) => clean(v).replace(/\b(UCITS|ETF|ACC|DIST|CAPI|EUR|USD|C|D)\b/gi, ' ').replace(/\s+/g, ' ').trim();
+    const joined = core(q.replace(/&/g, ''));          // « S&P 500 » → « SP 500 »
+    const spaced = core(q.replace(/&/g, ' '));         // « S&P 500 » → « S P 500 »
+    const words = joined.split(' ');
+    return [...new Set([q, clean(q.replace(/&/g, '')), joined, spaced, words.slice(0, 3).join(' '), words.slice(0, 2).join(' ')])]
+      .filter((v) => v.length >= 2);
+  },
+
+  /**
+   * Lit le CSV d'historique Euronext et renvoie la séance la plus récente.
+   * Format : lignes « JJ/MM/AAAA;Ouv;Haut;Bas;Dernier;Clôture;… » (point décimal).
+   * @returns {{price, date: 'AAAA-MM-JJ'}} ou null
+   */
+  parseHistoryCsv(text) {
+    let best = null;
+    for (const [date, price] of Euronext.parseHistoryRows(text)) {
+      if (!best || date > best.date) best = { date, price };
+    }
+    return best;
+  },
+
+  /** Toutes les séances du CSV : [['AAAA-MM-JJ', clôture], ...] triées par date. */
+  parseHistoryRows(text) {
+    const rows = [];
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const cols = line.replace(/^\uFEFF/, '').split(';');
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((cols[0] || '').trim());
+      if (!m) continue;
+      const date = `${m[3]}-${m[2]}-${m[1]}`;
+      const close = parseFloat(cols[5]);
+      const last = parseFloat(cols[4]);
+      const price = close > 0 ? close : last > 0 ? last : NaN;
+      if (Dates.isValidISO(date) && price > 0) rows.push([date, price]);
+    }
+    return rows.sort((a, b) => a[0].localeCompare(b[0]));
+  },
+
+  /** Recherche Euronext : candidats de la première variante qui donne des résultats. */
+  async search(query, fetchFn = fetch) {
+    for (const v of Euronext.queryVariants(query)) {
+      const text = await Euronext.get(`${Euronext.BASE}/en/instrumentSearch/searchJSON?q=${encodeURIComponent(v)}`, fetchFn);
+      let json;
+      try { json = JSON.parse(text.slice(text.indexOf('['))); } catch (e) { throw new QuoteError('format', 'recherche'); }
+      const found = Euronext.parseSearch(json);
+      if (found.length) return found;
+    }
+    return [];
+  },
+
+  /**
+   * Trouve l'ISIN et la place d'un ticker ou d'un ISIN.
+   * Correspondance exacte → instrument. Sinon QuoteError 'ambiguous' avec
+   * err.candidates (l'utilisateur choisit), ou 'notfound'.
+   */
+  async resolve(query, fetchFn = fetch) {
+    const candidates = await Euronext.search(query, fetchFn);
+    if (!candidates.length) throw new QuoteError('notfound', query);
+    const exact = Euronext.exactMatch(candidates, query);
+    if (exact) return exact;
+    const err = new QuoteError('ambiguous', query);
+    err.candidates = candidates.slice(0, 6);
+    throw err;
+  },
+
+  /**
+   * Dernier cours d'un instrument (séances des 15 derniers jours) et, si
+   * `since` est donné ('AAAA-MM-JJ'), tout l'historique depuis cette date
+   * (pour la courbe de performance).
+   */
+  async lastPrice(ins, fetchFn = fetch, today = new Date(), since = null) {
+    let start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 15);
+    if (since && Dates.isValidISO(since)) {
+      const from = Dates.parse(since);
+      from.setDate(from.getDate() - 7); // marge : l'achat peut tomber un week-end ou un jour férié
+      if (from < start) start = from;
+    }
+    const url = `${Euronext.BASE}/en/ajax/AwlHistoricalPrice/getFullDownloadAjax/${ins.isin}-${ins.mic}` +
+      `?format=csv&decimal_separator=.&date_form=d/m/Y&op=&adjusted=Y&base100=` +
+      `&startdate=${Dates.toISO(start)}&enddate=${Dates.toISO(today)}`;
+    const text = await Euronext.get(url, fetchFn);
+    if (!/Date;/.test(text)) throw new QuoteError('format', 'historique : ' + text.slice(0, 60));
+    const last = Euronext.parseHistoryCsv(text);
+    if (!last) throw new QuoteError('noprice');
+    return { ...last, history: since ? Euronext.parseHistoryRows(text) : [] };
+  },
+
+  /**
+   * Cours actuel d'un titre suivi.
+   * @param ticker  ticker (PSP5) ou ISIN (FR0011871128)
+   * @param known   instrument déjà résolu (évite une recherche)
+   * @param since   'AAAA-MM-JJ' : rapatrie aussi l'historique depuis cette date
+   * @returns {{price, date, at, instrument, history}}
+   */
+  async quote(ticker, known = null, fetchFn = fetch, since = null) {
+    let ins = known && Euronext.validIsin(known.isin) ? known : await Euronext.resolve(ticker, fetchFn);
+    let last;
+    try {
+      last = await Euronext.lastPrice(ins, fetchFn, new Date(), since);
+    } catch (e) {
+      // Instrument mémorisé qui ne répond plus (radiation, changement de place…) : nouvelle recherche
+      if (!known || !(e instanceof QuoteError) || !['notfound', 'noprice', 'server'].includes(e.code)) throw e;
+      ins = await Euronext.resolve(ticker, fetchFn);
+      last = await Euronext.lastPrice(ins, fetchFn, new Date(), since);
+    }
+    return { ...last, at: new Date().toISOString(), instrument: ins };
+  },
+};
+
+/* ==========================================================================
+   5. GRAPHIQUES SVG MAISON
+   --------------------------------------------------------------------------
+   drawChart(container, { xs, series, xLabel, yFormat, step, stacked })
+     xs      : valeurs numériques de l'axe X (timestamps, mois…)
+     series  : [{ name, color (variable CSS), values: [...], area: bool, step: bool, dash: bool }]
+     step    : tracé en escalier pour toutes les séries (sinon par série)
+     stacked : les aires sont empilées (valeur affichée = somme)
+   Survol / toucher : ligne verticale + infobulle listant toutes les séries.
+   ========================================================================== */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs = {}, parent) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (parent) parent.appendChild(el);
+  return el;
+}
+
+/** Graduations « rondes » pour l'axe Y. */
+function niceTicks(max, count = 4) {
+  if (max <= 0) return [0];
+  const raw = max / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+  const ticks = [];
+  for (let v = 0; v <= max + step * 0.001; v += step) ticks.push(v);
+  if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
+  return ticks;
+}
+
+function drawChart(container, opts) {
+  const { xs, series, xLabel, yFormat, tickFormat = Fmt.compactEur, step = false, stacked = false, emptyText = 'Pas encore de données' } = opts;
+  container.innerHTML = '';
+  const W = container.clientWidth || 320;
+  const H = container.clientHeight || 220;
+  const m = { top: 10, right: 12, bottom: 26, left: 48 };
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' }, container);
+
+  if (!xs.length) {
+    svgEl('text', { x: W / 2, y: H / 2, 'text-anchor': 'middle', class: 'empty-msg' }, svg).textContent = emptyText;
+    return;
+  }
+
+  // Valeurs affichées (empilées si besoin)
+  const shown = [];
+  series.forEach((s, si) => {
+    shown[si] = s.values.map((v, i) => (stacked && si > 0 ? shown[si - 1][i] + v : v));
+  });
+  const flat = shown.flat();
+  // Valeurs négatives (performance) : l'axe descend sous le zéro ; sinon il part de 0
+  const signed = opts.signed === true;
+  const yMax = signed ? Math.max(...flat, 0.0001) : Math.max(...flat, 1);
+  const yMin = signed ? Math.min(...flat, 0) : 0;
+  let ticks, top, bottom;
+  if (signed && yMin < 0) {
+    // même pas au-dessus et au-dessous de zéro
+    const raw = (yMax - yMin) / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const step = [1, 2, 2.5, 5, 10].map((k) => k * mag).find((v) => v >= raw);
+    bottom = Math.floor(yMin / step - 1e-9) * step;
+    top = Math.ceil(yMax / step - 1e-9) * step;
+    ticks = [];
+    for (let v = bottom; v <= top + step * 0.001; v += step) ticks.push(Math.abs(v) < step * 1e-6 ? 0 : v);
+  } else {
+    ticks = niceTicks(yMax);
+    top = ticks[ticks.length - 1];
+    bottom = 0;
+  }
+
+  const x0 = xs[0];
+  const x1 = xs.length > 1 ? xs[xs.length - 1] : xs[0] + 1;
+  const sx = (x) => m.left + ((x - x0) / (x1 - x0)) * (W - m.left - m.right);
+  const sy = (y) => H - m.bottom - ((y - bottom) / (top - bottom)) * (H - m.top - m.bottom);
+
+  // Quadrillage + axe Y
+  const grid = svgEl('g', { class: 'grid' }, svg);
+  ticks.forEach((t) => {
+    if (t !== 0) svgEl('line', { x1: m.left, x2: W - m.right, y1: sy(t), y2: sy(t) }, grid);
+    svgEl('text', { x: m.left - 6, y: sy(t) + 4, 'text-anchor': 'end', class: 'tick' }, svg).textContent = tickFormat(t);
+  });
+  svgEl('line', { x1: m.left, x2: W - m.right, y1: sy(0), y2: sy(0), class: 'baseline' }, svg);
+
+  // Axe X : 2 à 4 étiquettes
+  const nLabels = Math.min(xs.length, W < 360 ? 3 : 4);
+  const seen = new Set();
+  for (let k = 0; k < nLabels; k++) {
+    const idx = nLabels === 1 ? 0 : Math.round((k * (xs.length - 1)) / (nLabels - 1));
+    if (seen.has(idx)) continue;
+    seen.add(idx);
+    const anchor = k === 0 ? 'start' : k === nLabels - 1 ? 'end' : 'middle';
+    svgEl('text', { x: sx(xs[idx]), y: H - 6, 'text-anchor': anchor, class: 'tick' }, svg).textContent = xLabel(xs[idx]);
+  }
+
+  // Chemins : ligne (2px) + aire translucide
+  const pathFor = (vals, st) => {
+    let d = '';
+    vals.forEach((v, i) => {
+      const X = sx(xs[i]); const Y = sy(v);
+      if (i === 0) d += `M${X},${Y}`;
+      else if (st) d += `H${X}V${Y}`;
+      else d += `L${X},${Y}`;
+    });
+    if (xs.length === 1) d += `H${W - m.right}`; // un seul point : ligne horizontale
+    return d;
+  };
+  series.forEach((s, si) => {
+    const line = pathFor(shown[si], step || s.step);
+    if (s.area) {
+      const lower = si > 0 && stacked ? shown[si - 1] : null;
+      let d = line;
+      if (lower) {
+        // referme l'aire sur la série du dessous (parcours inverse)
+        for (let i = xs.length - 1; i >= 0; i--) d += `L${sx(xs[i])},${sy(lower[i])}`;
+        d += 'Z';
+      } else {
+        d += `V${sy(0)}H${sx(xs[0])}Z`;
+      }
+      svgEl('path', { d, style: `fill: var(${s.color}); fill-opacity: 0.22; stroke: none` }, svg);
+    }
+    svgEl('path', { d: line, style: `fill: none; stroke: var(${s.color})${s.dash ? '; stroke-dasharray: 6 4' : ''}`, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+  });
+
+  // Couche d'interaction (crosshair + infobulle)
+  const cross = svgEl('line', { class: 'crosshair', y1: m.top, y2: H - m.bottom, visibility: 'hidden' }, svg);
+  const dots = series.map((s) => svgEl('circle', { r: 4, style: `fill: var(${s.color}); stroke: var(--surface)`, 'stroke-width': 2, visibility: 'hidden' }, svg));
+  const hit = svgEl('rect', { x: m.left, y: 0, width: W - m.left - m.right, height: H, fill: 'transparent' }, svg);
+
+  const tooltip = document.getElementById('tooltip');
+  const show = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * W;
+    // point le plus proche en X
+    let idx = 0; let best = Infinity;
+    xs.forEach((x, i) => { const dd = Math.abs(sx(x) - px); if (dd < best) { best = dd; idx = i; } });
+    const X = sx(xs[idx]);
+    cross.setAttribute('x1', X); cross.setAttribute('x2', X); cross.setAttribute('visibility', 'visible');
+    dots.forEach((dot, si) => { dot.setAttribute('cx', X); dot.setAttribute('cy', sy(shown[si][idx])); dot.setAttribute('visibility', 'visible'); });
+
+    tooltip.replaceChildren();
+    const title = document.createElement('div');
+    title.className = 'tt-title';
+    title.textContent = opts.tooltipTitle ? opts.tooltipTitle(xs[idx], idx) : xLabel(xs[idx]);
+    tooltip.appendChild(title);
+    const rows = opts.tooltipRows ? opts.tooltipRows(idx) : series.map((s) => ({ name: s.name, color: s.color, value: yFormat(s.values[idx]) }));
+    rows.forEach((r) => {
+      const row = document.createElement('div'); row.className = 'tt-row';
+      const key = document.createElement('i'); key.className = 'tt-key'; key.style.background = r.color ? `var(${r.color})` : 'transparent';
+      const b = document.createElement('b'); b.textContent = r.value;
+      const span = document.createElement('span'); span.textContent = r.name;
+      row.append(key, b, span);
+      tooltip.appendChild(row);
+    });
+    tooltip.hidden = false;
+    const tw = tooltip.offsetWidth;
+    const left = Math.min(Math.max(ev.clientX - tw / 2, 8), window.innerWidth - tw - 8);
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = (rect.top - tooltip.offsetHeight - 8 > 0 ? rect.top - tooltip.offsetHeight - 8 : rect.bottom + 8) + 'px';
+  };
+  const hide = () => {
+    tooltip.hidden = true;
+    cross.setAttribute('visibility', 'hidden');
+    dots.forEach((d) => d.setAttribute('visibility', 'hidden'));
+  };
+  hit.addEventListener('pointermove', show);
+  hit.addEventListener('pointerdown', show);
+  hit.addEventListener('pointerleave', hide);
+  hit.addEventListener('pointercancel', hide);
+}
+
+/* ==========================================================================
+   6. INTERFACE
+   ========================================================================== */
+const App = {
+  state: null,
+
+  histories: {},     // historiques de cours (pas dans l'export : ce sont des données publiques)
+  lastQuoteFetch: 0,
+
+  init() {
+    // Version affichée en premier : visible même si la suite du démarrage échoue
+    document.getElementById('version-badge').textContent = `v${APP_VERSION}`;
+    document.getElementById('app-version').textContent = `Budget & Patrimoine v${APP_VERSION} — cours : Euronext en direct, secours ${ACTIVE_PROVIDER.label.toLowerCase()}`;
+    App.state = Store.load();
+    App.histories = App.loadHistories();
+    App.applyTheme();
+    App.bindNavigation();
+    App.bindPurchases();
+    App.bindPlanner();
+    App.bindSimulator();
+    App.bindPea();
+    App.bindBanners();
+    Budget.init();
+    App.renderAll();
+    window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
+
+    // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)
+    // Cours : d'abord la clôture publiée par la GitHub Action (historique du
+    // graphique + secours), puis le cours Euronext une fois par jour si activé
+    App.refreshQuotes({ silent: true }).finally(App.maybeAutoRefresh);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      if (Date.now() - App.lastQuoteFetch > 30 * 60 * 1000) App.refreshQuotes({ silent: true });
+      App.maybeAutoRefresh(); // l'appli peut rester ouverte en arrière-plan plusieurs jours
+    });
+
+    App.registerServiceWorker();
+
+    if (Store.loadIssues) {
+      alert(Store.loadIssues < 0
+        ? 'Vos données n\'ont pas pu être lues. Une copie de secours a été conservée : importez votre dernière sauvegarde (onglet PEA).'
+        : `${Store.loadIssues} ligne(s) abîmée(s) ont été ignorées. Une copie de secours des données d'origine a été conservée.`);
+    }
+    // Demande au navigateur de ne pas effacer les données en cas de manque de place
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  },
+
+  /* ---------- Service worker : hors ligne + avis de mise à jour ---------- */
+  swReg: null,
+  reloadOnUpdate: false,
+
+  registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    // Une page déjà contrôlée qui change de contrôleur = nouvelle version installée
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (App.reloadOnUpdate) location.reload(); // demandé via le bouton ↻
+      else if (hadController) document.getElementById('update-banner').hidden = false;
+    });
+    navigator.serviceWorker.register('sw.js')
+      .then((reg) => { App.swReg = reg; return reg.update(); })
+      .catch((e) => console.warn('SW non enregistré', e));
+  },
+
+  /**
+   * Bouton ↻ : cherche une nouvelle version de l'appli (et la charge),
+   * sinon actualise les cours. Utile dans l'appli installée sur iPhone,
+   * où l'on ne peut pas recharger la page.
+   */
+  async refreshApp() {
+    const btn = document.getElementById('btn-refresh');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add('spinning');
+    try {
+      const reg = App.swReg;
+      if (!reg) { location.reload(); return; }
+      await reg.update();
+      if (reg.installing || reg.waiting) {
+        // Nouvelle version trouvée : on recharge dès qu'elle est active
+        App.reloadOnUpdate = true;
+        App.toast('Mise à jour en cours…');
+        setTimeout(() => location.reload(), 8000); // filet de sécurité
+        return;
+      }
+      await App.refreshQuotes({ silent: true });
+      const { ok, total } = await App.refreshAllLive({ silent: true, force: true });
+      App.toast(`Appli à jour (v${APP_VERSION})` + (total ? (ok === total ? ' · cours actualisés' : ` · ${ok}/${total} cours actualisé(s)`) : ''));
+    } catch (e) {
+      console.warn('Actualisation impossible', e);
+      App.toast('Actualisation impossible (hors ligne ?)');
+    }
+    btn.disabled = false;
+    btn.classList.remove('spinning');
+  },
+
+  bindBanners() {
+    document.getElementById('btn-refresh').addEventListener('click', App.refreshApp);
+    document.getElementById('btn-reload').addEventListener('click', () => location.reload());
+    document.getElementById('btn-backup-now').addEventListener('click', App.exportJSON);
+  },
+
+  /* ---------- Historique des cours (cache local pour le hors ligne) ---------- */
+  HISTORY_KEY: 'budget-patrimoine:pea:histories',
+  loadHistories() {
+    try { return JSON.parse(localStorage.getItem(App.HISTORY_KEY)) || {}; } catch (e) { return {}; }
+  },
+  saveHistories() {
+    try { localStorage.setItem(App.HISTORY_KEY, JSON.stringify(App.histories)); } catch (e) { /* quota : tant pis */ }
+  },
+
+  persist() { Store.save(App.state); },
+
+  debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; },
+
+  toast(msg) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(App._toastT);
+    App._toastT = setTimeout(() => { el.hidden = true; }, 2500);
+  },
+
+  /* ---------- Navigation par onglets (hash) ---------- */
+  bindNavigation() {
+    const go = () => {
+      const name = (location.hash || '#patrimoine').slice(1);
+      const view = document.getElementById('view-' + name) || document.getElementById('view-patrimoine');
+      document.querySelectorAll('.view').forEach((v) => { v.hidden = v !== view; });
+      document.querySelectorAll('.tabbar a').forEach((a) => a.classList.toggle('active', 'view-' + a.dataset.view === view.id));
+      document.getElementById('view-title').textContent = view.dataset.title;
+      document.getElementById('tooltip').hidden = true;
+      window.scrollTo(0, 0);
+      App.renderCharts(); // les graphiques ont besoin d'une vue visible pour connaître leur largeur
+    };
+    window.addEventListener('hashchange', go);
+    go();
+  },
+
+  renderAll() {
+    App.renderDashboard();
+    App.renderPlanner();
+    App.renderPurchases();
+    App.renderSimulator();
+    App.renderPea();
+    App.renderCharts();
+    Budget.renderPatrimoine();
+  },
+
+  renderCharts() {
+    App.renderCumulChart();
+    App.renderPerfCharts();
+    App.renderSimChart();
+    Budget.renderCharts();
+  },
+
+  /* ---------- Tableau de bord ---------- */
+  renderDashboard() {
+    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const cls = Fmt.trend;
+
+    document.getElementById('kpi-value').textContent = Fmt.eur(pf.value);
+    const pvEl = document.getElementById('kpi-pv');
+    pvEl.textContent = `${Fmt.signedEur(pf.pvGross)} (${Fmt.signedPct(pf.pvGrossPct)})`;
+    pvEl.className = 'hero-delta ' + cls(pf.pvGross);
+    const netEl = document.getElementById('kpi-net');
+    netEl.textContent = pf.fees > 0
+      ? `Frais ${Fmt.eur(pf.fees)} · nette de frais ${Fmt.signedEur(pf.pv)} (${Fmt.signedPct(pf.pvPct)})`
+      : '';
+    netEl.hidden = !(pf.fees > 0);
+    document.getElementById('kpi-invested').textContent = Fmt.eur(pf.invested);
+    const pvEur = document.getElementById('kpi-pv-eur');
+    pvEur.textContent = Fmt.signedEur(pf.pvGross);
+    pvEur.className = 'kpi-value ' + cls(pf.pvGross);
+    document.getElementById('kpi-pru').textContent = pf.positions.length === 1 ? Fmt.unitPrice(pf.positions[0].pruGross) : (pf.positions.length ? 'voir titres' : '—');
+    document.getElementById('kpi-qty').textContent = Fmt.num(pf.qty);
+
+    // Rendement annualisé (TRI) : n'a de sens qu'après quelques semaines
+    const xr = Calc.portfolioXirr(App.state.purchases, pf.value);
+    const xEl = document.getElementById('kpi-xirr');
+    const xHint = document.getElementById('kpi-xirr-hint');
+    if (!xr) {
+      xEl.textContent = '—'; xEl.className = 'kpi-value'; xHint.textContent = '';
+    } else if (xr.days < 30 || xr.rate === null) {
+      xEl.textContent = '—'; xEl.className = 'kpi-value';
+      xHint.textContent = 'Disponible après 1 mois';
+    } else {
+      xEl.textContent = Fmt.signedPct(xr.rate);
+      xEl.className = 'kpi-value ' + cls(xr.rate);
+      xHint.textContent = xr.days < 365 ? 'par an · moins d\'1 an de recul' : 'par an';
+    }
+
+    // Cash disponible = versements − achats
+    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const cashEl = document.getElementById('kpi-cash');
+    const cashHint = document.getElementById('kpi-cash-hint');
+    if (dep.hasDeposits) {
+      cashEl.textContent = Fmt.eur(dep.cash);
+      cashEl.className = 'kpi-value ' + (dep.cash < 0 ? 'neg' : '');
+      cashHint.textContent = dep.cash < 0 ? 'Achats > versements : un versement manque ?' : '';
+    } else {
+      cashEl.textContent = '—';
+      cashEl.className = 'kpi-value';
+      cashHint.textContent = 'Saisissez vos versements (onglet PEA)';
+    }
+
+    // Rappel de sauvegarde
+    const banner = document.getElementById('backup-banner');
+    const last = App.state.lastExport;
+    const age = last ? Dates.daysBetween(Dates.parse(last), new Date()) : Infinity;
+    banner.hidden = !(App.state.purchases.length && age > 30);
+    document.getElementById('backup-text').textContent = last
+      ? `Dernière sauvegarde il y a ${age} jours.`
+      : 'Aucune sauvegarde de vos données pour l\'instant.';
+
+    const warn = document.getElementById('kpi-warning');
+    warn.hidden = !pf.missingQuotes.length;
+    warn.textContent = pf.missingQuotes.length
+      ? `Pas de cours pour ${pf.missingQuotes.join(', ')} : valorisé au dernier prix d'achat. Touchez « Actualiser le cours ».`
+      : '';
+
+    // Une carte par titre, avec saisie du cours actuel.
+    // Si l'utilisateur est en train de taper un cours, on le restaure après le rendu.
+    const box = document.getElementById('positions');
+    const active = document.activeElement;
+    const typing = active && box.contains(active) && active.name === 'price'
+      ? { ticker: active.dataset.ticker, value: active.value } : null;
+    box.replaceChildren();
+    if (!pf.positions.length) {
+      const p = document.createElement('p');
+      p.className = 'empty';
+      p.textContent = 'Ajoutez un achat pour voir vos positions.';
+      box.appendChild(p);
+      return;
+    }
+    for (const pos of pf.positions) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="position-head"><strong></strong><span class="${cls(pos.pvGross)}"></span></div>
+        <p class="position-name"><span data-f="name"></span><button class="link-btn" type="button" data-a="change">Changer de titre</button></p>
+        <div class="position-grid">
+          <div>Parts<b data-f="qty"></b></div>
+          <div>PRU (hors frais)<b data-f="pru"></b></div>
+          <div>Investi<b data-f="invested"></b></div>
+          <div>Valeur<b data-f="value"></b></div>
+        </div>
+        <p class="hint position-net" data-f="net"></p>
+        <div class="perf-box">
+          <p class="label">Ma performance</p>
+          <div class="chart chart-small" data-f="perf" role="img"></div>
+          <p class="hint" data-f="perf-hint" hidden></p>
+        </div>
+        <div class="quote-box">
+          <div class="quote-main">
+            <b class="quote-price" data-f="price"></b>
+            <span class="hint quote-meta" data-f="meta"></span>
+          </div>
+          <button class="btn btn-small btn-live" type="button" data-a="live"></button>
+        </div>
+        <p class="quote-error" data-f="error" role="alert" hidden></p>
+        <div class="resolver" data-f="resolver" hidden>
+          <div class="candidates" data-f="candidates"></div>
+          <form class="resolver-form" autocomplete="off">
+            <label>Ticker ou ISIN sur Euronext
+              <input type="text" name="code" autocapitalize="characters" autocorrect="off" spellcheck="false" placeholder="ex. DCAM ou FR001400U5Q4" enterkeyhint="search">
+            </label>
+            <button class="btn btn-small btn-primary" type="submit">Chercher</button>
+          </form>
+        </div>
+        <form class="price-row" autocomplete="off">
+          <label>Corriger à la main (€)
+            <input type="text" inputmode="decimal" name="price" enterkeyhint="done">
+          </label>
+          <button class="btn btn-small" type="submit">OK</button>
+        </form>`;
+      // textContent pour les données saisies (jamais d'innerHTML avec des données)
+      const q = App.state.prices[pos.ticker];
+      const ins = App.state.instruments[pos.ticker];
+      const status = App.liveStatus[pos.ticker] || {};
+      card.querySelector('.position-head strong').textContent = pos.ticker;
+      card.querySelector('[data-f=perf]').dataset.ticker = pos.ticker;
+      card.querySelector('.position-head span').textContent = `${Fmt.signedEur(pos.pvGross)} · ${Fmt.signedPct(pos.pvGrossPct)}`;
+      const netP = card.querySelector('[data-f=net]');
+      netP.textContent = pos.fees > 0
+        ? `Frais ${Fmt.eur(pos.fees)} · nette de frais ${Fmt.signedEur(pos.pv)} (${Fmt.signedPct(pos.pvPct)}), PRU frais inclus ${Fmt.unitPrice(pos.pru)}`
+        : '';
+      netP.hidden = !(pos.fees > 0);
+      const nameEl = card.querySelector('[data-f=name]');
+      nameEl.textContent = ins ? `${ins.name}${ins.symbol && ins.symbol !== pos.ticker ? ' · ' + ins.symbol : ''} · ${ins.isin}` : '';
+      card.querySelector('.position-name').hidden = !ins;
+      card.querySelector('[data-a=change]').addEventListener('click', () => {
+        App.liveStatus[pos.ticker] = { code: 'change' };
+        App.renderDashboard();
+      });
+      card.querySelector('[data-f=qty]').textContent = Fmt.num(pos.qty);
+      card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pruGross);
+      card.querySelector('[data-f=invested]').textContent = Fmt.eur(pos.invested);
+      card.querySelector('[data-f=value]').textContent = Fmt.eur(pos.value);
+      card.querySelector('[data-f=price]').textContent = pos.hasQuote ? Fmt.unitPrice(pos.currentPrice) : '—';
+      card.querySelector('[data-f=meta]').textContent = App.quoteMeta(q, pos);
+
+      // Bouton « Actualiser le cours » (Euronext)
+      const live = card.querySelector('[data-a=live]');
+      live.textContent = status.loading ? 'Récupération…' : '↻ Actualiser le cours';
+      live.disabled = !!status.loading;
+      live.addEventListener('click', () => App.refreshLive(pos.ticker, { force: true, announce: true }));
+
+      // Échec : message clair, la saisie manuelle reste disponible juste en dessous
+      const errEl = card.querySelector('[data-f=error]');
+      errEl.hidden = !status.error;
+      if (status.error) {
+        const about = status.query ? ` (recherche : « ${status.query} »)` : '';
+        errEl.textContent = ['notfound', 'ambiguous'].includes(status.code)
+          ? `${status.error}${about}`
+          : `${status.error} ${pos.hasQuote ? 'Le dernier cours connu est conservé. ' : ''}Vous pouvez saisir le cours à la main ci-dessous.`;
+      }
+
+      // Titre introuvable, plusieurs possibilités ou « Changer de titre » :
+      // l'utilisateur choisit dans la liste ou indique le ticker / l'ISIN Euronext
+      const resolver = card.querySelector('[data-f=resolver]');
+      resolver.hidden = !['notfound', 'ambiguous', 'change'].includes(status.code);
+      const list = card.querySelector('[data-f=candidates]');
+      if (status.code === 'change') {
+        const hint = document.createElement('p');
+        hint.className = 'hint';
+        hint.textContent = 'Indiquez le ticker ou l\'ISIN exact du titre (visible dans l\'appli de votre banque).';
+        list.appendChild(hint);
+      }
+      for (const c of status.candidates || []) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn candidate';
+        const nm = document.createElement('span');
+        nm.textContent = c.name || c.symbol;
+        const sub = document.createElement('small');
+        sub.textContent = `${c.symbol} · ${c.isin} · ${c.mic === 'XPAR' ? 'Paris' : c.mic}`;
+        b.append(nm, sub);
+        b.addEventListener('click', () => App.chooseInstrument(pos.ticker, c));
+        list.appendChild(b);
+      }
+      card.querySelector('.resolver-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const code = e.target.code.value.trim();
+        if (code) App.refreshLive(pos.ticker, { force: true, announce: true, query: code });
+      });
+
+      const input = card.querySelector('input[name=price]');
+      input.dataset.ticker = pos.ticker;
+      input.value = pos.hasQuote ? Fmt.input(pos.currentPrice) : '';
+      input.placeholder = Fmt.input(pos.lastPrice);
+      card.querySelector('.price-row').addEventListener('submit', (e) => {
+        e.preventDefault();
+        App.setPrice(pos.ticker, input.value);
+      });
+      box.appendChild(card);
+      if (typing && typing.ticker === pos.ticker) {
+        input.value = typing.value;
+        input.focus({ preventScroll: true });
+      }
+    }
+
+    // Tout actualiser d'un coup
+    const all = document.createElement('button');
+    all.className = 'btn';
+    all.textContent = '↻ Actualiser tous les cours';
+    all.disabled = Object.values(App.liveStatus).some((st) => st.loading);
+    all.addEventListener('click', () => App.refreshAllLive({ silent: false, force: true }));
+    box.appendChild(all);
+    App.renderPerfCharts(); // les cartes viennent d'être recréées
+  },
+
+  /** Texte sous le prix : séance, date et heure de mise à jour, source. */
+  quoteMeta(q, pos) {
+    if (!q || !(q.price > 0)) return `Pas encore de cours · dernier prix d'achat ${Fmt.unitPrice(pos.lastPrice)}`;
+    const at = Fmt.dateTime(q.at);
+    if (q.source === 'euronext') return `Séance du ${Fmt.date(q.date)} · actualisé le ${at} · Euronext`;
+    if (q.source === 'auto') return `Clôture du ${Fmt.date(q.date)}${at ? ` · reçue le ${at}` : ''} · GitHub (Yahoo)`;
+    return `Saisi à la main le ${at || Fmt.date(q.date)}`;
+  },
+
+  setPrice(ticker, raw) {
+    const price = Calc.parseNumber(raw);
+    if (raw.trim() === '') {
+      delete App.state.prices[ticker];
+    } else if (!(price > 0)) {
+      App.toast('Cours invalide');
+      return;
+    } else {
+      App.state.prices[ticker] = { price, date: Dates.today(), source: 'manuel', at: new Date().toISOString() };
+    }
+    delete App.liveStatus[ticker];
+    App.persist();
+    App.renderAll();
+    App.toast('Cours enregistré');
+  },
+
+  /* ---------- Cours en direct (Euronext) ---------- */
+  liveStatus: {}, // { TICKER: {loading} | {error, code} } — non enregistré
+
+  /**
+   * Récupère le cours d'un titre sur Euronext.
+   * @param force  true (bouton) : remplace toujours le cours enregistré ;
+   *               false (automatique) : ne remplace pas une saisie manuelle
+   *               du même jour ou plus récente.
+   * @returns true si un cours a été obtenu
+   */
+  async refreshLive(ticker, { force = true, announce = false, query = null } = {}) {
+    if ((App.liveStatus[ticker] || {}).loading) return false;
+    App.liveStatus[ticker] = { loading: true };
+    App.renderDashboard();
+    try {
+      const known = query ? null : App.state.instruments[ticker];
+      const q = await Euronext.quote(query || ticker, known, fetch, App.firstPurchaseDate(ticker));
+      // Un code saisi par l'utilisateur vaut confirmation du titre
+      App.state.instruments[ticker] = { ...q.instrument, confirmed: !!(query || (known && known.confirmed)) };
+      const cur = App.state.prices[ticker];
+      if (force || !cur || cur.source !== 'manuel' || q.date > cur.date) {
+        App.state.prices[ticker] = { price: q.price, date: q.date, source: 'euronext', at: q.at };
+      }
+      App.liveStatus[ticker] = {};
+      // Historique des cours depuis le 1er achat : sert à la courbe de performance
+      if (q.history && q.history.length) {
+        App.histories[ticker] = Calc.mergeHistory(App.histories[ticker], q.history);
+        App.saveHistories();
+      }
+      App.persist();
+      if (announce) App.toast(`${ticker} : ${Fmt.unitPrice(q.price)} (séance du ${Fmt.date(q.date)})`);
+      return true;
+    } catch (e) {
+      const err = e instanceof QuoteError ? e : new QuoteError('network', e && e.message);
+      if (['notfound', 'ambiguous'].includes(err.code)) delete App.state.instruments[ticker];
+      App.liveStatus[ticker] = {
+        error: err.message,
+        code: err.code,
+        query: ['notfound', 'ambiguous'].includes(err.code) ? (query || ticker) : null,
+        candidates: err.candidates || [],
+      };
+      console.warn('Cours indisponible', ticker, err.code, err.detail);
+      return false;
+    } finally {
+      App.renderAll();
+    }
+  },
+
+  /** Date du premier achat d'un titre ('AAAA-MM-JJ'), null s'il n'y en a pas. */
+  firstPurchaseDate(ticker) {
+    const dates = App.state.purchases.filter((p) => Calc.normTicker(p.ticker) === ticker).map((p) => p.date).sort();
+    return dates[0] || null;
+  },
+
+  /** L'utilisateur a choisi le bon titre dans la liste : on le retient et on récupère le cours. */
+  async chooseInstrument(ticker, candidate) {
+    App.state.instruments[ticker] = { ...candidate, confirmed: true };
+    App.persist();
+    delete App.liveStatus[ticker];
+    return App.refreshLive(ticker, { force: true, announce: true });
+  },
+
+  /** Actualise tous les titres, l'un après l'autre (pour ménager Euronext). */
+  async refreshAllLive({ silent = false, force = true } = {}) {
+    const tickers = Calc.portfolio(App.state.purchases).positions.map((p) => p.ticker);
+    let ok = 0;
+    for (const t of tickers) if (await App.refreshLive(t, { force })) ok++;
+    if (!silent && tickers.length) {
+      App.toast(ok === tickers.length ? 'Cours actualisés' : `${ok}/${tickers.length} cours actualisé(s) : voir le message sous le titre`);
+    }
+    return { ok, total: tickers.length };
+  },
+
+  /** Actualisation automatique : une fois par jour, à l'ouverture (désactivable). */
+  async maybeAutoRefresh() {
+    const s = App.state;
+    if (!s.settings.autoRefresh || s.lastAutoRefresh === Dates.today() || !s.purchases.length) return;
+    const { ok } = await App.refreshAllLive({ silent: true, force: false });
+    if (ok > 0) {
+      s.lastAutoRefresh = Dates.today();
+      App.persist();
+    }
+  },
+
+  /** Charge les cours du fournisseur actif et les fusionne avec les cours saisis. */
+  async refreshQuotes({ silent = false } = {}) {
+    if (!ACTIVE_PROVIDER.auto) return false;
+    App.lastQuoteFetch = Date.now();
+    let data = null;
+    try { data = await ACTIVE_PROVIDER.load(); } catch (e) { console.warn('Cours indisponibles', e); }
+    if (!data) {
+      if (!silent) App.toast('Cours indisponibles (hors ligne ?)');
+      return false;
+    }
+    const n = mergeQuotes(App.state.prices, data.quotes, ACTIVE_PROVIDER.id, data.updatedAt);
+    // Par titre : l'historique de la GitHub Action remplace celui du même titre, sans effacer
+    // ceux rapatriés depuis Euronext (titres que la GitHub Action ne suit pas)
+    const merged = { ...App.histories, ...data.histories };
+    const histChanged = JSON.stringify(merged) !== JSON.stringify(App.histories);
+    if (histChanged) { App.histories = merged; App.saveHistories(); }
+    if (n) App.persist();
+    if (n || histChanged) App.renderAll();
+    if (!silent) App.toast(n ? `${n} cours mis à jour` : 'Cours déjà à jour');
+    return true;
+  },
+
+  renderCumulChart() {
+    const el = document.getElementById('chart-cumul');
+    if (el.offsetParent === null) return; // vue masquée
+
+    // Avec l'historique des cours : valeur réelle vs versements, jour par jour
+    const vs = Calc.valueSeries(App.state.purchases, App.histories);
+    document.getElementById('legend-value').hidden = vs.length < 2;
+    document.getElementById('chart-cumul-legend').hidden = vs.length < 2;
+    document.getElementById('chart-cumul-title').textContent = vs.length >= 2 ? 'Valeur et versements' : 'Versements cumulés';
+    if (vs.length >= 2) {
+      drawChart(el, {
+        xs: vs.map((p) => Dates.parse(p.date).getTime()),
+        series: [
+          { name: 'Versé', color: '--series-invested', values: vs.map((p) => p.invested), area: true, step: true },
+          { name: 'Valeur', color: '--series-value', values: vs.map((p) => p.value) },
+        ],
+        xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+        tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+        tooltipRows: (i) => [
+          { name: 'Valeur', color: '--series-value', value: Fmt.eur(vs[i].value) },
+          { name: 'Versé', color: '--series-invested', value: Fmt.eur(vs[i].invested) },
+          { name: 'Plus-value', value: Fmt.signedEur(vs[i].value - vs[i].invested) },
+        ],
+        yFormat: Fmt.eur,
+      });
+      return;
+    }
+
+    // Sinon : versements cumulés seuls
+    const pts = Calc.cumulativeSeries(App.state.purchases);
+    drawChart(el, {
+      xs: pts.map((p) => Dates.parse(p.date).getTime()),
+      series: [{ name: 'Versé', color: '--series-invested', values: pts.map((p) => p.total), area: true }],
+      xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+      tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+      yFormat: Fmt.eur,
+      step: true,
+      emptyText: 'Ajoutez un achat pour voir la courbe',
+    });
+  },
+
+  /**
+   * Courbe de performance personnelle : plus-value latente en % (hors frais,
+   * comme la carte du titre), jour par jour depuis le premier achat.
+   * Un graphique par titre + un pour le total.
+   */
+  perfChartOpts(ps, ariaLabel) {
+    const up = ps[ps.length - 1].pct >= 0;
+    const color = up ? '--good' : '--bad';
+    return {
+      signed: true,
+      xs: ps.map((p) => Dates.parse(p.date).getTime()),
+      series: [{ name: 'Performance', color, values: ps.map((p) => p.pct), area: true }],
+      xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+      tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+      tooltipRows: (i) => [
+        { name: 'Performance', color, value: Fmt.signedPct(ps[i].pct) },
+        { name: 'Plus-value', value: Fmt.signedEur(ps[i].pv) },
+        { name: 'Valeur', value: Fmt.eur(ps[i].value) },
+        { name: 'Investi (hors frais)', value: Fmt.eur(ps[i].gross) },
+      ],
+      yFormat: Fmt.signedPct,
+      tickFormat: (v) => (v > 0 ? '+' : '') + String(Math.round(v * 10000) / 100).replace('.', ',') + ' %',
+      ariaLabel,
+    };
+  },
+
+  renderPerfCharts() {
+    if (document.getElementById('view-dashboard').hidden) return; // vue masquée : pas de largeur à mesurer
+    const hist = Calc.withLatestQuotes(App.histories, App.state.prices);
+    const purchases = App.state.purchases;
+
+    // Un graphique par titre
+    document.querySelectorAll('#positions [data-f=perf]').forEach((el) => {
+      const ticker = el.dataset.ticker;
+      const hint = el.parentElement.querySelector('[data-f=perf-hint]');
+      const ps = Calc.performanceSeries(purchases, hist, ticker);
+      el.hidden = ps.length < 2;
+      hint.hidden = ps.length >= 2;
+      if (ps.length < 2) {
+        el.replaceChildren();
+        hint.textContent = App.histories[ticker] && App.histories[ticker].length
+          ? 'La courbe apparaît à partir du 2e jour de cotation après votre premier achat.'
+          : 'Touchez « Actualiser le cours » pour charger l\'historique et afficher la courbe.';
+        return;
+      }
+      const o = App.perfChartOpts(ps);
+      el.setAttribute('aria-label', `Performance de ${ticker} depuis le premier achat`);
+      drawChart(el, o);
+    });
+
+    // Total du portefeuille
+    const el = document.getElementById('chart-perf');
+    if (!el) return;
+    const ps = Calc.performanceSeries(purchases, hist);
+    const hint = document.getElementById('chart-perf-hint');
+    el.hidden = ps.length < 2;
+    hint.hidden = ps.length >= 2 || !purchases.length;
+    if (ps.length < 2) {
+      el.replaceChildren();
+      hint.textContent = 'Actualisez les cours de chaque titre pour charger leur historique : la courbe s\'affichera ensuite.';
+      return;
+    }
+    const last = ps[ps.length - 1];
+    document.getElementById('chart-perf-now').textContent = `${Fmt.signedPct(last.pct)} · ${Fmt.signedEur(last.pv)}`;
+    document.getElementById('chart-perf-now').className = 'perf-now ' + Fmt.trend(last.pv);
+    drawChart(el, App.perfChartOpts(ps));
+  },
+
+  /* ---------- Achats ---------- */
+  bindPurchases() {
+    const dlg = document.getElementById('purchase-dialog');
+    const form = document.getElementById('purchase-form');
+    document.getElementById('btn-add').addEventListener('click', () => App.openPurchase());
+    document.getElementById('btn-cancel').addEventListener('click', () => dlg.close());
+    form.addEventListener('input', App.updatePurchaseTotal);
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (App.savePurchase()) dlg.close();
+    });
+  },
+
+  /** Ticker par défaut : celui du dernier achat, sinon DCAM. */
+  defaultTicker() {
+    const last = App.state.purchases.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
+    return last ? last.ticker : 'DCAM';
+  },
+
+  /**
+   * Ouvre la fenêtre d'achat.
+   * @param p        achat existant à modifier (avec id) — ou rien pour un nouvel achat
+   * @param prefill  valeurs pré-remplies d'un nouvel achat (calculateur)
+   */
+  openPurchase(p, prefill = null) {
+    const form = document.getElementById('purchase-form');
+    const v = p || prefill || {};
+    form.id.value = p ? p.id : '';
+    form.date.value = v.date || Dates.today();
+    form.ticker.value = v.ticker || App.defaultTicker();
+    form.qty.value = Fmt.input(v.qty);
+    form.price.value = Fmt.input(v.price);
+    form.fees.value = Fmt.input(v.fees);
+    document.getElementById('purchase-dialog-title').textContent = p ? "Modifier l'achat" : 'Nouvel achat';
+    document.getElementById('purchase-error').hidden = true;
+    App.updatePurchaseTotal();
+    document.getElementById('purchase-dialog').showModal();
+  },
+
+  readPurchaseForm() {
+    const f = document.getElementById('purchase-form');
+    return {
+      id: f.id.value || Store.newId(),
+      date: f.date.value,
+      ticker: Calc.normTicker(f.ticker.value),
+      qty: Calc.parseNumber(f.qty.value),
+      price: Calc.parseNumber(f.price.value),
+      fees: Calc.parseNumber(f.fees.value, true),
+    };
+  },
+
+  updatePurchaseTotal() {
+    const p = App.readPurchaseForm();
+    const el = document.getElementById('purchase-total');
+    el.textContent = p.qty > 0 && p.price > 0 && p.fees >= 0 ? `Montant total : ${Fmt.eur(Calc.purchaseCost(p))}` : '';
+  },
+
+  savePurchase() {
+    const p = App.readPurchaseForm();
+    const err = document.getElementById('purchase-error');
+    let msg = '';
+    if (!Dates.isValidISO(p.date)) msg = 'Date invalide.';
+    else if (!p.ticker) msg = 'Indiquez un ticker ou un nom.';
+    else if (!(p.qty > 0)) msg = 'Nombre de parts invalide.';
+    else if (!(p.price > 0)) msg = 'Prix unitaire invalide.';
+    else if (!(p.fees >= 0)) msg = 'Frais invalides.';
+    if (msg) { err.textContent = msg; err.hidden = false; return false; }
+
+    const i = App.state.purchases.findIndex((x) => x.id === p.id);
+    if (i >= 0) App.state.purchases[i] = p; else App.state.purchases.push(p);
+    App.persist();
+    App.renderAll();
+    App.toast(i >= 0 ? 'Achat modifié' : 'Achat ajouté');
+    return true;
+  },
+
+  deletePurchase(id) {
+    const p = App.state.purchases.find((x) => x.id === id);
+    if (!p || !confirm(`Supprimer l'achat ${p.ticker} du ${Fmt.date(p.date)} ?`)) return;
+    App.state.purchases = App.state.purchases.filter((x) => x.id !== id);
+    App.persist();
+    App.renderAll();
+    App.toast('Achat supprimé');
+  },
+
+  renderPurchases() {
+    const list = document.getElementById('purchase-list');
+    const sorted = App.state.purchases.slice().sort((a, b) => b.date.localeCompare(a.date));
+    document.getElementById('purchase-empty').hidden = sorted.length > 0;
+    list.replaceChildren();
+    for (const p of sorted) {
+      const card = document.createElement('div');
+      card.className = 'card purchase';
+      card.innerHTML = `
+        <div class="purchase-top"><strong></strong><strong data-f="total"></strong></div>
+        <div class="purchase-meta"></div>
+        <div class="purchase-actions">
+          <button class="btn" data-a="edit">Modifier</button>
+          <button class="btn btn-danger" data-a="del">Supprimer</button>
+        </div>`;
+      card.querySelector('.purchase-top strong').textContent = `${p.ticker} · ${Fmt.date(p.date)}`;
+      card.querySelector('[data-f=total]').textContent = Fmt.eur(Calc.purchaseCost(p));
+      card.querySelector('.purchase-meta').textContent =
+        `${Fmt.num(p.qty)} part${p.qty > 1 ? 's' : ''} × ${Fmt.unitPrice(p.price)} · frais ${Fmt.eur(p.fees)}`;
+      card.querySelector('[data-a=edit]').addEventListener('click', () => App.openPurchase(p));
+      card.querySelector('[data-a=del]').addEventListener('click', () => App.deletePurchase(p.id));
+      list.appendChild(card);
+    }
+  },
+
+  /* ---------- Calculateur « prochain achat » ---------- */
+  fillPlannerValues() {
+    const form = document.getElementById('plan-form');
+    form.amount.value = Fmt.input(App.state.plan.amount);
+    form.fees.value = App.state.plan.fees ? Fmt.input(App.state.plan.fees) : '';
+    delete form.price.dataset.touched;
+  },
+
+  bindPlanner() {
+    const form = document.getElementById('plan-form');
+    App.fillPlannerValues();
+    form.addEventListener('submit', (e) => e.preventDefault());
+    form.addEventListener('input', (e) => {
+      if (e.target.name === 'price') form.price.dataset.touched = '1';
+      const amount = Calc.parseNumber(form.amount.value);
+      const fees = Calc.parseNumber(form.fees.value, true);
+      if (amount > 0 && fees >= 0) { App.state.plan = { amount, fees }; App.persist(); }
+      App.renderPlanner();
+    });
+    document.getElementById('btn-plan-save').addEventListener('click', () => {
+      const r = App.planResult();
+      if (!r) return;
+      App.openPurchase(null, { ticker: App.defaultTicker(), qty: r.qty, price: r.price, fees: r.fees });
+    });
+  },
+
+  /** Lit le calculateur : cours saisi, sinon dernier cours connu du titre. */
+  planResult() {
+    const form = document.getElementById('plan-form');
+    const ticker = App.defaultTicker();
+    const known = App.state.prices[ticker];
+    if (!form.price.dataset.touched || form.price.value === '') {
+      form.price.value = known ? Fmt.input(known.price) : '';
+    }
+    const amount = Calc.parseNumber(form.amount.value);
+    const price = Calc.parseNumber(form.price.value);
+    const fees = Calc.parseNumber(form.fees.value, true);
+    const plan = Calc.buyPlan(amount, price, fees);
+    return plan ? { ...plan, amount, price, fees, ticker } : null;
+  },
+
+  renderPlanner() {
+    const r = App.planResult();
+    const res = document.getElementById('plan-result');
+    const left = document.getElementById('plan-left');
+    const btn = document.getElementById('btn-plan-save');
+    if (!r) {
+      res.textContent = '';
+      left.textContent = 'Indiquez un montant et le cours actuel.';
+      btn.disabled = true;
+      return;
+    }
+    if (r.qty === 0) {
+      res.textContent = '0 part';
+      left.textContent = `Montant insuffisant pour une part à ${Fmt.unitPrice(r.price)}${r.fees ? ' frais compris' : ''}.`;
+      btn.disabled = true;
+      return;
+    }
+    res.textContent = `${Fmt.num(r.qty)} ${r.ticker} × ${Fmt.unitPrice(r.price)}`;
+    left.textContent = `Coût ${Fmt.eur(r.cost)}${r.fees ? ' frais compris' : ''} · reste ${Fmt.eur(r.left)} en cash.`;
+    btn.disabled = false;
+  },
+
+  /* ---------- Simulateur ---------- */
+  bindSimulator() {
+    const form = document.getElementById('sim-form');
+    App.bindSimulatorValues();
+    form.addEventListener('submit', (e) => e.preventDefault());
+
+    // « Utiliser mes vrais chiffres » : versement mensuel et capital de départ calculés
+    const real = document.getElementById('sim-real');
+    real.addEventListener('change', () => {
+      App.state.sim.useReal = real.checked;
+      App.persist();
+      App.bindSimulatorValues();
+      App.renderSimulator();
+      App.renderSimChart();
+    });
+
+    form.addEventListener('input', App.debounce((e) => {
+      if (e && e.target && e.target.id === 'sim-real') return;
+      const v = {
+        monthly: Calc.parseNumber(form.monthly.value, true),
+        rate: Calc.parseNumber(form.rate.value, true),
+        years: Calc.parseNumber(form.years.value, true),
+        initial: Calc.parseNumber(form.initial.value, true),
+        ter: Calc.parseNumber(form.ter.value, true),
+      };
+      // En mode « vrais chiffres », versement et capital viennent des achats : on garde les valeurs libres
+      if (App.realInputs()) { v.monthly = App.state.sim.monthly; v.initial = App.state.sim.initial; }
+      // Saisie incomplète ou hors bornes : on garde le dernier calcul et on le signale
+      const LABELS = { monthly: 'Versement mensuel', rate: 'Rendement (entre −100 et 100 %)', years: 'Durée (0 à 80 ans)', initial: 'Capital de départ', ter: 'Frais (0 à 100 %)' };
+      const bad = Object.keys(v).filter((k) => !Calc.validSim(k, v[k]));
+      const err = document.getElementById('sim-error');
+      err.hidden = !bad.length;
+      err.textContent = bad.length ? `À corriger : ${bad.map((k) => LABELS[k]).join(', ')}.` : '';
+      if (bad.length) return;
+      App.state.sim = { ...v, useReal: App.state.sim.useReal };
+      App.persist();
+      App.renderSimulator();
+      App.renderSimChart();
+    }, 200));
+
+    // « Et si je plaçais de l'argent fictif ? » : rien n'est enregistré
+    const wi = document.getElementById('whatif-form');
+    wi.addEventListener('submit', (e) => e.preventDefault());
+    wi.addEventListener('input', App.debounce(() => App.renderWhatIf(), 150));
+    wi.addEventListener('change', () => App.renderWhatIf());
+  },
+
+  /** Durée lisible : 1 → « 1 mois », 18 → « 1 an 6 mois », 120 → « 10 ans ». */
+  fmtMonths(m) {
+    const y = Math.floor(m / 12);
+    const r = m % 12;
+    const ys = y ? `${y} an${y > 1 ? 's' : ''}` : '';
+    const rs = r ? `${r} mois` : '';
+    return [ys, rs].filter(Boolean).join(' ');
+  },
+
+  /** Placement fictif d'un seul versement : valeur finale + jalons (1 mois à 20 ans). */
+  renderWhatIf() {
+    const form = document.getElementById('whatif-form');
+    const err = document.getElementById('whatif-error');
+    const out = document.getElementById('whatif-result');
+    const amount = Calc.parseNumber(form.amount.value, true);
+    const dur = Calc.parseNumber(form.duration.value);
+    const months = Math.round(dur * (form.unit.value === 'years' ? 12 : 1));
+    const bad = [];
+    if (!Calc.validSim('initial', amount) || amount > 1e9) bad.push('Montant');
+    if (!Number.isFinite(months) || months < 1 || months > 960) bad.push('Durée (1 mois à 80 ans)');
+    err.hidden = !bad.length;
+    err.textContent = bad.length ? `À corriger : ${bad.join(', ')}.` : '';
+    out.hidden = !!bad.length;
+    if (bad.length) return;
+
+    const s = App.state.sim;
+    const marks = [...new Set([1, 3, 6, 12, 60, 120, 240, months])].sort((a, b) => a - b);
+    const rows = Calc.whatIf({ amount, annualRate: s.rate, ter: s.ter, months: marks });
+    const main = rows.find((r) => r.months === months);
+
+    document.getElementById('whatif-label').textContent =
+      `${Fmt.eur0(amount)} placés, valeur au bout de ${App.fmtMonths(months)}`;
+    document.getElementById('whatif-final').textContent = Fmt.eur(main.value);
+    const gain = document.getElementById('whatif-gain');
+    gain.textContent = `${Fmt.signedEur(main.gain)} (${Fmt.signedPct(main.gainPct)}) à ${Fmt.num(s.rate)} %/an, frais ${Fmt.num(s.ter)} %`;
+    gain.className = 'hero-delta ' + Fmt.trend(main.gain);
+
+    const table = document.getElementById('whatif-table');
+    table.replaceChildren();
+    const addRow = (cells, cls, strong) => {
+      const row = document.createElement('div');
+      if (cls) row.className = cls;
+      for (const c of cells) {
+        const span = document.createElement(strong ? 'strong' : 'span');
+        span.textContent = c;
+        row.appendChild(span);
+      }
+      table.appendChild(row);
+    };
+    addRow(['Après', 'Valeur', 'Gain'], 'head', false);
+    for (const r of rows) addRow([App.fmtMonths(r.months), Fmt.eur(r.value), Fmt.signedEur(r.gain)], '', r.months === months);
+  },
+
+  /**
+   * Vrais chiffres (si l'option est active et qu'il y a des achats) :
+   * versement mensuel moyen, valeur actuelle et montant réellement investi.
+   */
+  realInputs() {
+    if (!App.state.sim.useReal) return null;
+    const pace = Calc.realPace(App.state.purchases);
+    if (!pace) return null;
+    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    return { pace, monthly: Math.round(pace.monthly), initial: Math.round(pf.value * 100) / 100, initialInvested: pf.invested, pf };
+  },
+
+  simResult() {
+    const s = App.state.sim;
+    const real = App.realInputs();
+    return Calc.simulate({
+      monthly: real ? real.monthly : s.monthly,
+      initial: real ? real.initial : s.initial,
+      initialInvested: real ? real.initialInvested : null,
+      annualRate: s.rate,
+      years: s.years,
+      ter: s.ter,
+    });
+  },
+
+  renderSimulator() {
+    App.fillRealFields();
+    App.renderRealCompare();
+    const r = App.simResult();
+    const real = App.realInputs();
+    document.getElementById('sim-final-label').textContent = real
+      ? `Capital estimé dans ${Fmt.num(App.state.sim.years)} an${App.state.sim.years >= 2 ? 's' : ''}`
+      : 'Capital final estimé';
+    document.getElementById('sim-final').textContent = Fmt.eur0(r.final);
+    document.getElementById('sim-invested').textContent = Fmt.eur0(r.invested);
+    const g = document.getElementById('sim-gains');
+    g.textContent = Fmt.eur0(r.gains);
+    const investedShare = r.final > 0 ? Math.min(r.invested / r.final, 1) : 1;
+    document.getElementById('sim-bar-invested').style.width = (investedShare * 100) + '%';
+    document.getElementById('sim-bar-gains').style.width = (Math.max(1 - investedShare, 0) * 100) + '%';
+    document.getElementById('sim-share').textContent = r.gains >= 0
+      ? `Les gains représentent ${Fmt.pct(r.gainsShare)} du capital final (×${Fmt.num(Math.round((r.final / (r.invested || 1)) * 100) / 100)} vos versements).`
+      : 'Rendement net négatif : le capital final est inférieur aux versements.';
+    App.renderWhatIf();
+  },
+
+  /** En mode « vrais chiffres », affiche les valeurs calculées dans les champs (non modifiables). */
+  fillRealFields() {
+    const form = document.getElementById('sim-form');
+    const toggle = document.getElementById('sim-real');
+    const hint = document.getElementById('sim-real-hint');
+    const hasPurchases = App.state.purchases.length > 0;
+    toggle.checked = App.state.sim.useReal;
+    toggle.disabled = !hasPurchases;
+    const real = App.realInputs();
+    form.monthly.disabled = !!real;
+    form.initial.disabled = !!real;
+    if (real) {
+      form.monthly.value = Fmt.input(real.monthly);
+      form.initial.value = Fmt.input(real.initial);
+      hint.textContent = `${Fmt.eur0(real.monthly)}/mois en moyenne depuis le ${Fmt.date(real.pace.since)}, départ de votre valeur actuelle (${Fmt.eur(real.initial)}).`;
+    } else {
+      hint.textContent = hasPurchases
+        ? 'Valeur actuelle et versement mensuel moyen, calculés depuis vos achats.'
+        : 'Ajoutez des achats pour partir de vos vrais chiffres.';
+    }
+  },
+
+  /** Carte « Mon DCA réel vs l'hypothèse » : valeur réelle vs valeur au taux choisi. */
+  renderRealCompare() {
+    const card = document.getElementById('real-card');
+    const pace = Calc.realPace(App.state.purchases);
+    card.hidden = !pace;
+    if (!pace) return;
+    const s = App.state.sim;
+    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const today = Dates.today();
+    const expected = Calc.valueAtRate(App.state.purchases, s.rate, s.ter, today);
+    const diff = pf.value - expected;
+    const diffPct = expected > 0 ? diff / expected : 0;
+    const rateTxt = `${Fmt.num(s.rate)} %`;
+
+    document.getElementById('real-pace').textContent =
+      `Depuis le ${Fmt.date(pace.since)} : ${pace.count} achat${pace.count > 1 ? 's' : ''}, ${Fmt.eur(pace.total)} investis, soit ${Fmt.eur0(pace.monthly)}/mois en moyenne.`;
+    document.getElementById('real-value').textContent = Fmt.eur(pf.value);
+    document.getElementById('real-rate-label').textContent = `Au taux de ${rateTxt}`;
+    document.getElementById('real-legend-rate').textContent = `Au taux de ${rateTxt}`;
+    document.getElementById('real-expected').textContent = Fmt.eur(expected);
+
+    const diffEl = document.getElementById('real-diff');
+    if (Math.abs(diffPct) < 0.005) {
+      diffEl.textContent = 'Pile dans l\'hypothèse.';
+      diffEl.className = 'hero-delta real-diff';
+    } else {
+      diffEl.textContent = diff > 0
+        ? `${Fmt.signedEur(diff)} d'avance sur l'hypothèse (${Fmt.signedPct(diffPct)})`
+        : `${Fmt.eur(-diff)} de retard sur l'hypothèse (${Fmt.signedPct(diffPct)})`;
+      diffEl.className = 'hero-delta real-diff ' + Fmt.trend(diff);
+    }
+
+    const net = Calc.netRate(s.rate, s.ter);
+    const xr = Calc.portfolioXirr(App.state.purchases, pf.value);
+    document.getElementById('real-xirr').textContent = xr && xr.rate !== null && xr.days >= 30
+      ? `Rendement réel annualisé : ${Fmt.signedPct(xr.rate)}/an, contre ${Fmt.signedPct(net)}/an dans l'hypothèse (${rateTxt} − frais ${Fmt.num(s.ter)} %).${xr.days < 365 ? ' Moins d\'un an de recul : à prendre avec prudence.' : ''}`
+      : `Hypothèse : ${Fmt.signedPct(net)}/an net de frais. Rendement réel annualisé disponible après 1 mois.`;
+    if (pf.missingQuotes.length) {
+      document.getElementById('real-xirr').textContent += ' Attention : cours manquant pour ' + pf.missingQuotes.join(', ') + '.';
+    }
+  },
+
+  /** Courbe « réel vs hypothèse » (jour par jour, grâce à l'historique des cours). */
+  renderRealChart() {
+    const el = document.getElementById('chart-real');
+    const box = document.getElementById('real-chart-box');
+    const hint = document.getElementById('real-chart-hint');
+    if (document.getElementById('real-card').hidden) return;
+    const vs = Calc.valueSeries(App.state.purchases, App.histories);
+    box.hidden = vs.length < 2;
+    hint.hidden = vs.length >= 2;
+    if (vs.length < 2 || el.offsetParent === null) return;
+    const s = App.state.sim;
+    const pts = vs.map((p) => ({ ...p, atRate: Calc.valueAtRate(App.state.purchases, s.rate, s.ter, p.date) }));
+    drawChart(el, {
+      xs: pts.map((p) => Dates.parse(p.date).getTime()),
+      series: [
+        { name: 'Versé', color: '--series-invested', values: pts.map((p) => p.invested), area: true, step: true },
+        { name: 'Valeur réelle', color: '--series-value', values: pts.map((p) => p.value) },
+        { name: `Au taux de ${Fmt.num(s.rate)} %`, color: '--series-rate', values: pts.map((p) => p.atRate), dash: true },
+      ],
+      xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+      tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+      tooltipRows: (i) => [
+        { name: 'Valeur réelle', color: '--series-value', value: Fmt.eur(pts[i].value) },
+        { name: `Au taux de ${Fmt.num(s.rate)} %`, color: '--series-rate', value: Fmt.eur(pts[i].atRate) },
+        { name: 'Versé', color: '--series-invested', value: Fmt.eur(pts[i].invested) },
+        { name: 'Écart', value: Fmt.signedEur(pts[i].value - pts[i].atRate) },
+      ],
+      yFormat: Fmt.eur,
+    });
+  },
+
+  renderSimChart() {
+    App.renderRealChart();
+    const el = document.getElementById('chart-sim');
+    if (el.offsetParent === null) return;
+    const r = App.simResult();
+    // Un point par an (plus lisible et léger) + le dernier mois
+    const pts = r.points.filter((p, i) => p.month % 12 === 0 || i === r.points.length - 1);
+    if (pts.length < 2) { drawChart(el, { xs: [], series: [], xLabel: String, yFormat: Fmt.eur, emptyText: 'Indiquez une durée' }); return; }
+    drawChart(el, {
+      xs: pts.map((p) => p.month / 12),
+      series: [
+        { name: 'Versé', color: '--series-invested', values: pts.map((p) => p.invested), area: true },
+        { name: 'Gains', color: '--series-gains', values: pts.map((p) => Math.max(p.value - p.invested, 0)), area: true },
+      ],
+      stacked: true,
+      xLabel: (x) => `${Fmt.num(Math.round(x * 10) / 10)} an${x >= 2 ? 's' : ''}`,
+      tooltipTitle: (x) => `Après ${Fmt.num(Math.round(x * 10) / 10)} an${x >= 2 ? 's' : ''}`,
+      tooltipRows: (i) => [
+        { name: 'Capital', value: Fmt.eur0(pts[i].value) },
+        { name: 'Versé', color: '--series-invested', value: Fmt.eur0(pts[i].invested) },
+        { name: 'Gains', color: '--series-gains', value: Fmt.eur0(pts[i].value - pts[i].invested) },
+      ],
+      yFormat: Fmt.eur0,
+    });
+  },
+
+  /* ---------- PEA : 5 ans, plafond, sauvegarde, thème ---------- */
+  bindPea() {
+    const od = document.getElementById('opening-date');
+    od.value = App.state.openingDate;
+    od.addEventListener('change', () => {
+      if (!Dates.isValidISO(od.value)) { od.value = App.state.openingDate; return; }
+      App.state.openingDate = od.value;
+      App.persist();
+      App.renderPea();
+    });
+
+    // Versements
+    const df = document.getElementById('deposit-form');
+    df.date.value = Dates.today();
+    df.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const amount = Calc.parseNumber(df.amount.value);
+      const err = document.getElementById('deposit-error');
+      if (!Dates.isValidISO(df.date.value) || !(amount > 0)) {
+        err.textContent = 'Date ou montant invalide.';
+        err.hidden = false;
+        return;
+      }
+      err.hidden = true;
+      App.state.deposits.push({ id: Store.newId(), date: df.date.value, amount });
+      App.persist();
+      df.amount.value = '';
+      App.renderAll();
+      App.toast('Versement ajouté');
+    });
+
+    document.getElementById('btn-export').addEventListener('click', App.exportJSON);
+    document.getElementById('import-file').addEventListener('change', App.importJSON);
+    const auto = document.getElementById('set-autorefresh');
+    auto.checked = App.state.settings.autoRefresh;
+    auto.addEventListener('change', () => {
+      App.state.settings.autoRefresh = auto.checked;
+      App.persist();
+      App.toast(auto.checked ? 'Actualisation automatique activée' : 'Actualisation automatique désactivée');
+    });
+
+    document.getElementById('btn-theme').addEventListener('click', () => {
+      App.state.theme = App.state.theme === 'dark' ? 'light' : 'dark';
+      App.persist();
+      App.applyTheme();
+      App.renderCharts();
+    });
+  },
+
+  applyTheme() {
+    const theme = App.state.theme;
+    document.documentElement.dataset.theme = theme;
+    document.querySelector('meta[name=theme-color]').setAttribute('content', theme === 'dark' ? '#0d0d0d' : '#f9f9f7');
+    document.getElementById('btn-theme').textContent = theme === 'dark' ? 'Passer en thème clair' : 'Passer en thème sombre';
+  },
+
+  renderPea() {
+    const c = Calc.peaCountdown(App.state.openingDate);
+    const rem = c.remaining;
+    const parts = [];
+    if (rem.years) parts.push(`${rem.years} an${rem.years > 1 ? 's' : ''}`);
+    if (rem.months) parts.push(`${rem.months} mois`);
+    if (rem.days || !parts.length) parts.push(`${rem.days} jour${rem.days > 1 ? 's' : ''}`);
+    document.getElementById('pea-remaining').textContent = c.reached ? '✓ 5 ans atteints' : parts.join(' ');
+    document.getElementById('pea-date').textContent = c.reached
+      ? `Depuis le ${Fmt.date(c.targetISO)} : gains exonérés d'impôt sur le revenu (prélèvements sociaux dus).`
+      : `Échéance le ${Fmt.date(c.targetISO)} (${Fmt.num(c.daysLeft)} jours). ${Fmt.pct(c.progress)} du chemin.`;
+    document.getElementById('pea-gauge-time').style.width = (c.progress * 100) + '%';
+
+    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const ce = Calc.ceiling(dep.base);
+    document.getElementById('pea-ceiling-source').textContent = dep.hasDeposits
+      ? 'Calculé sur vos versements.'
+      : 'Estimé à partir de vos achats (frais inclus) : ajoutez vos versements pour un calcul exact.';
+    App.renderDeposits();
+    document.getElementById('pea-ceiling').textContent = `${Fmt.eur0(ce.used)} / ${Fmt.eur0(PEA_CEILING)}`;
+    document.getElementById('pea-gauge-ceiling').style.width = Math.max(ce.progress * 100, ce.used > 0 ? 1 : 0) + '%';
+    document.getElementById('pea-ceiling-left').textContent = `Encore ${Fmt.eur0(ce.remaining)} de versements possibles (${Fmt.pct(ce.progress)} utilisé).`;
+  },
+
+  renderDeposits() {
+    const list = document.getElementById('deposit-list');
+    list.replaceChildren();
+    const sorted = App.state.deposits.slice().sort((a, b) => b.date.localeCompare(a.date));
+    for (const d of sorted) {
+      const row = document.createElement('div');
+      row.className = 'deposit';
+      const date = document.createElement('span');
+      date.textContent = Fmt.date(d.date);
+      const amount = document.createElement('b');
+      amount.textContent = Fmt.eur(d.amount);
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn btn-danger';
+      del.setAttribute('aria-label', `Supprimer le versement du ${Fmt.date(d.date)}`);
+      del.textContent = '✕';
+      del.addEventListener('click', () => {
+        if (!confirm(`Supprimer le versement de ${Fmt.eur(d.amount)} du ${Fmt.date(d.date)} ?`)) return;
+        App.state.deposits = App.state.deposits.filter((x) => x.id !== d.id);
+        App.persist();
+        App.renderAll();
+      });
+      row.append(date, amount, del);
+      list.appendChild(row);
+    }
+  },
+
+  /**
+   * Export JSON. Sur iPhone (appli installée), un lien de téléchargement ne
+   * marche pas bien : on passe par la feuille de partage, qui propose
+   * « Enregistrer dans Fichiers ». Ailleurs : téléchargement classique.
+   * La date de sauvegarde n'est mise à jour que si l'export a bien eu lieu.
+   */
+  async exportJSON() {
+    const name = `pea-${Dates.today()}.json`;
+    const json = JSON.stringify({ ...App.state, lastExport: Dates.today() }, null, 2);
+    const done = () => {
+      App.state.lastExport = Dates.today();
+      App.persist();
+      App.renderDashboard();
+    };
+
+    const file = new File([json], name, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: 'Sauvegarde Suivi PEA' });
+        done();
+        App.toast('Sauvegarde exportée');
+      } catch (e) {
+        if (e.name !== 'AbortError') App.toast('Export impossible : ' + e.message);
+      }
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    done();
+  },
+
+  importJSON(e) {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = Store.sanitize(JSON.parse(reader.result));
+        if (!confirm(`Remplacer les données actuelles par cette sauvegarde (${data.purchases.length} achat(s)) ?`)) return;
+        App.state = data;
+        App.persist();
+        document.getElementById('opening-date').value = data.openingDate;
+        App.applyTheme();
+        App.bindSimulatorValues();
+        App.fillPlannerValues();
+        document.getElementById('set-autorefresh').checked = data.settings.autoRefresh;
+        App.liveStatus = {};
+        App.renderAll();
+        App.toast('Sauvegarde importée');
+      } catch (err) {
+        alert('Import impossible : ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  },
+
+  /** Recharge les champs du simulateur après un import. */
+  bindSimulatorValues() {
+    const form = document.getElementById('sim-form');
+    const s = App.state.sim;
+    for (const k of ['monthly', 'rate', 'years', 'initial', 'ter']) form[k].value = Fmt.input(s[k]);
+  },
+};
+
+/* ---------- Démarrage (navigateur) / export (tests Node) ---------- */
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', App.init);
+}
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls, Euronext, QuoteError };
+}
