@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.1.0">
+  <link rel="stylesheet" href="style.css?v=2.2.0">
 </head>
 <body>
   <header class="topbar">
@@ -66,6 +66,53 @@
           <p class="error" id="account-error" hidden></p>
           <button type="submit" class="btn">+ Ajouter un compte</button>
         </form>
+      </div>
+
+      <h2>Synchronisation</h2>
+      <div class="card">
+        <p class="hint" style="margin-top:0">Entre iPhone, iPad et Mac. Les données sont chiffrées sur l'appareil avant l'envoi : le serveur ne voit qu'un bloc illisible.</p>
+        <p class="hint" id="sync-unconfigured">La synchronisation n'est pas encore configurée.</p>
+
+        <form id="sync-login" class="form" hidden>
+          <label>E-mail
+            <input name="email" type="email" autocomplete="username" required>
+          </label>
+          <label>Mot de passe
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <p class="error" id="sync-login-error" hidden></p>
+          <button type="submit" class="btn btn-primary">Se connecter</button>
+        </form>
+
+        <form id="sync-unlock" class="form" autocomplete="off" hidden>
+          <p class="hint" id="sync-unlock-hint" style="margin-top:0"></p>
+          <label>Phrase de chiffrement
+            <input name="passphrase" type="password" autocomplete="off" required>
+          </label>
+          <div id="sync-confirm-wrap" hidden>
+            <label>Confirmer la phrase
+              <input name="confirm" type="password" autocomplete="off">
+            </label>
+          </div>
+          <p class="error" id="sync-unlock-error" hidden></p>
+          <button type="submit" class="btn btn-primary">Déverrouiller</button>
+        </form>
+
+        <div id="sync-connected" class="stack" hidden>
+          <p class="label">Connecté : <span id="sync-email"></span></p>
+          <button class="btn" id="btn-sync-now" type="button">↻ Synchroniser maintenant</button>
+          <button class="btn btn-danger" id="btn-sync-logout" type="button">Se déconnecter de cet appareil</button>
+        </div>
+        <p class="hint" id="sync-status"></p>
+        <p class="hint">Serveur gratuit : il se met en pause après une semaine sans activité (une tâche automatique le garde éveillé). En cas de pause, relancez-le depuis supabase.com : les données ne sont pas perdues.</p>
+      </div>
+
+      <h2>Sauvegarde chiffrée</h2>
+      <div class="card stack">
+        <p class="hint" style="margin-top:0">Tout (budget, comptes, PEA) dans un fichier chiffré par une phrase : à garder dans Fichiers / iCloud Drive en secours.</p>
+        <button class="btn" id="btn-export-encrypted" type="button">⬇︎ Exporter une sauvegarde chiffrée</button>
+        <label class="btn" for="encrypted-import-file">⬆︎ Importer une sauvegarde chiffrée</label>
+        <input type="file" id="encrypted-import-file" class="visually-hidden" accept="application/json,.json,text/plain">
       </div>
 
       <div class="card" id="p-import-old" hidden>
@@ -458,7 +505,8 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.1.0"></script>
-  <script src="app.js?v=2.1.0"></script>
+  <script src="budget.js?v=2.2.0"></script>
+  <script src="app.js?v=2.2.0"></script>
+  <script src="sync.js?v=2.2.0"></script>
 </body>
 </html>

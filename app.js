@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.1.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.2.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -547,6 +547,7 @@ const Store = {
     } catch (e) {
       console.error('Sauvegarde impossible', e);
     }
+    if (typeof Sync !== 'undefined') Sync.schedule(); // envoi chiffré groupé, si la synchro est active
   },
 
   /** Import d'un fichier : strict, la moindre ligne invalide refuse le fichier. */
@@ -1178,6 +1179,7 @@ const App = {
     App.bindBanners();
     Budget.init();
     App.renderAll();
+    if (typeof Sync !== 'undefined') Sync.init();
     window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
 
     // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)

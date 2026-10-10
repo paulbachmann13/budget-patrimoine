@@ -21,6 +21,7 @@ Le code est public, les données ne le sont jamais :
 
 | Fichier | Rôle |
 |---|---|
+| `sync.js` | Synchronisation chiffrée (Supabase) et sauvegarde chiffrée |
 | `budget.js` | Module Budget : CSV, catégories, synthèses, stockage, onglets Patrimoine et Budget |
 | `app.js` | Partie PEA (calculs, cours, graphiques, interface) |
 | `index.html`, `style.css` | Structure (6 onglets) et thème sombre/clair, mobile-first |
@@ -39,6 +40,15 @@ Le code est public, les données ne le sont jamais :
 
 Incrémentez la version dans `app.js` (`APP_VERSION`), `sw.js` (`VERSION`) **et** dans les `?v=` d'`index.html` (les tests vérifient qu'elles concordent).
 
-## Synchronisation entre appareils (étape suivante)
+## Synchronisation entre appareils (Supabase, chiffrée)
 
-Prévue en dernier : Supabase avec chiffrement côté client. En attendant : export JSON dans iCloud Drive, import sur l'autre appareil.
+- `sync.js` : tout est chiffré **dans le navigateur** (AES-GCM 256, clé dérivée de la phrase de chiffrement par PBKDF2, 600 000 itérations) avant l'envoi. Supabase ne stocke qu'une ligne illisible par utilisateur (table `vault`, RLS).
+- La phrase n'est jamais envoyée ni enregistrée ; la clé dérivée reste sur l'appareil (IndexedDB, non exportable). **Phrase perdue = données synchronisées perdues** (les données locales restent).
+- Fusion à trois (appareil / serveur / dernière synchro) : ajouts et suppressions faits sur deux appareils ne s'écrasent pas ; contrôle de version côté serveur (`rev`).
+- Secours : « Exporter une sauvegarde chiffrée » (fichier autonome, même format de chiffrement).
+
+Mise en place (une fois) :
+1. Projet Supabase gratuit → SQL Editor → coller et exécuter `supabase/setup.sql`.
+2. Authentication → Sign In / Providers : **désactiver les inscriptions** ; Users → *Add user* (e-mail + mot de passe).
+3. Reporter l'URL du projet et la clé *publishable / anon* dans `SUPABASE` en haut de `sync.js` (jamais la clé *secret / service_role*).
+4. Le projet gratuit se met en pause après 7 jours sans activité : la GitHub Action `keepalive.yml` l'appelle tous les 3 jours.

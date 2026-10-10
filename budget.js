@@ -450,6 +450,7 @@ const BudgetStore = {
 
   save(state) {
     try { localStorage.setItem(BudgetStore.KEY, JSON.stringify(state)); } catch (e) { console.error('Sauvegarde du budget impossible', e); }
+    if (typeof Sync !== 'undefined') Sync.schedule(); // envoi chiffré groupé, si la synchro est active
   },
 };
 

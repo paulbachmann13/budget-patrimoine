@@ -1,0 +1,29 @@
+# Garde le projet Supabase gratuit éveillé (pause après 7 jours sans activité).
+# Appelle la fonction ping() (aucune donnée lue) avec l'URL et la clé publique de sync.js.
+name: Réveil Supabase
+
+on:
+  schedule:
+    - cron: '17 6 */3 * *' # tous les 3 jours, 6 h 17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Ping
+        run: |
+          node -e "
+            const { SUPABASE } = require('./sync.js');
+            if (!SUPABASE.url) { console.log('Synchro non configurée : rien à faire.'); process.exit(0); }
+            fetch(SUPABASE.url + '/rest/v1/rpc/ping', { method: 'POST', headers: { apikey: SUPABASE.key, 'Content-Type': 'application/json' }, body: '{}' })
+              .then(async (r) => { console.log(r.status, await r.text()); if (!r.ok) process.exit(1); })
+              .catch((e) => { console.error(e); process.exit(1); });
+          "

@@ -219,7 +219,7 @@ test('aucune donnée personnelle dans le dépôt (règles génériques seulement
   const crypto = require('node:crypto');
   const hash = (w) => crypto.createHash('sha256').update(w).digest('hex').slice(0, 16);
   const root = path.join(__dirname, '..');
-  const files = ['budget.js', 'app.js', 'index.html', 'style.css', 'sw.js', 'README.md', 'manifest.webmanifest',
+  const files = ['budget.js', 'app.js', 'sync.js', 'index.html', 'style.css', 'sw.js', 'README.md', 'manifest.webmanifest',
     ...fs.readdirSync(path.join(root, 'tests')).filter((f) => f.endsWith('.js')).map((f) => `tests/${f}`),
     ...fs.readdirSync(path.join(root, 'tools')).filter((f) => f.endsWith('.js')).map((f) => `tools/${f}`)];
   // Règles personnelles locales (hors dépôt) : si le fichier est là, ses libellés de plusieurs mots
