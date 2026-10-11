@@ -1180,8 +1180,8 @@ const Budget = {
   /* ---------- Patrimoine ---------- */
   renderPatrimoine() {
     if (typeof App === 'undefined' || !App.state || !Budget.state) return;
-    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
-    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const pf = Calc.portfolio(App.lots(), App.state.prices);
+    const dep = App.cashInfo();
     const pea = BudgetCore.peaTotal(pf.value, dep);
     const accounts = Budget.state.accounts;
     const cash = accounts.reduce((s, a) => s + a.balance, 0);

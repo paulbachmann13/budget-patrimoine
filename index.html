@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.3.1">
+  <link rel="stylesheet" href="style.css?v=2.4.0">
 </head>
 <body>
   <header class="topbar">
@@ -251,6 +251,9 @@
       <p class="hint" id="quotes-status">« Actualiser le cours » récupère le dernier cours sur Euronext. Vous pouvez toujours le corriger à la main.</p>
       <div id="positions" class="stack"></div>
 
+      <h2 id="closed-title" hidden>Positions vendues</h2>
+      <div id="closed-positions" class="stack"></div>
+
       <h2 id="chart-perf-title">Ma performance <span class="perf-now" id="chart-perf-now"></span></h2>
       <div class="card chart-card" id="chart-perf-card">
         <div id="chart-perf" class="chart" role="img" aria-label="Performance totale du portefeuille depuis le premier achat"></div>
@@ -402,9 +405,17 @@
         <div class="gauge" aria-hidden="true"><span id="pea-gauge-time"></span></div>
       </div>
 
-      <h2>Versements sur le PEA</h2>
+      <h2>Argent sur le PEA</h2>
       <form id="deposit-form" class="card form" autocomplete="off">
-        <p class="hint" style="margin:0 0 12px">Les virements de votre compte courant vers le PEA. Ils servent au plafond de 150 000 € et au calcul du cash disponible.</p>
+        <p class="hint" style="margin:0 0 12px">Versements depuis votre compte courant (ils comptent pour le plafond de 150 000 €), retraits, régularisations de frais ou autres crédits, et frais prélevés. Les ventes s'ajoutent toutes seules (onglet Bilan → Vendre).</p>
+        <label>Type
+          <select name="kind">
+            <option value="versement">Versement</option>
+            <option value="credit">Régularisation / crédit</option>
+            <option value="frais">Frais prélevés</option>
+            <option value="retrait">Retrait</option>
+          </select>
+        </label>
         <div class="row">
           <label>Date
             <input type="date" name="date" required>
@@ -413,8 +424,10 @@
             <input type="text" name="amount" inputmode="decimal" required>
           </label>
         </div>
+        <p class="hint" id="deposit-kind-hint"></p>
         <p class="error" id="deposit-error" hidden></p>
-        <button type="submit" class="btn btn-primary">+ Ajouter le versement</button>
+        <button type="submit" class="btn btn-primary">+ Ajouter</button>
+        <p class="hint" id="cash-summary"></p>
         <div id="deposit-list" class="stack"></div>
       </form>
 
@@ -525,6 +538,57 @@
     </div>
   </dialog>
 
+  <!-- Fenêtre de vente -->
+  <dialog id="sale-dialog">
+    <form id="sale-form" class="form" method="dialog" autocomplete="off">
+      <h2 id="sale-dialog-title">Vendre</h2>
+      <input type="hidden" name="id">
+      <label>Titre
+        <select name="ticker"></select>
+      </label>
+      <p class="hint" id="sale-held"></p>
+      <label>Date
+        <input type="date" name="date" required>
+      </label>
+      <div class="row">
+        <label>Parts vendues
+          <input type="text" name="qty" inputmode="decimal" required>
+        </label>
+        <label>Prix de vente (€)
+          <input type="text" name="price" inputmode="decimal" required>
+        </label>
+      </div>
+      <button type="button" class="link-btn" id="btn-sell-all">Tout vendre</button>
+      <label>Frais (€)
+        <input type="text" name="fees" inputmode="decimal" placeholder="0">
+      </label>
+      <p class="hint" id="sale-total"></p>
+      <p class="error" id="sale-error" hidden></p>
+      <div class="row">
+        <button type="button" class="btn" id="sale-cancel">Annuler</button>
+        <button type="submit" class="btn btn-primary" value="save">Enregistrer la vente</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Bilan d'une position -->
+  <dialog id="report-dialog">
+    <div class="form">
+      <h2 id="report-title"></h2>
+      <p class="hint" id="report-period" style="margin-top:0"></p>
+      <p class="hero-value" id="report-gain"></p>
+      <p class="hero-delta" id="report-gain-pct"></p>
+      <div class="position-grid" id="report-grid"></div>
+      <p class="label" style="margin-top:16px">Cours sur la période</p>
+      <div class="legend"><span><i class="key key-income"></i>Achats</span><span><i class="key key-expense"></i>Ventes</span></div>
+      <div id="report-chart" class="chart chart-small" role="img" aria-label="Cours du titre avec les achats et les ventes"></div>
+      <p class="hint" id="report-chart-hint" hidden></p>
+      <p class="label" style="margin-top:16px">Opérations</p>
+      <div id="report-ops" class="stack report-ops"></div>
+      <button type="button" class="btn btn-block" id="report-close" style="margin-top:16px">Fermer</button>
+    </div>
+  </dialog>
+
   <div class="banner banner-update" id="update-banner" hidden>
     <p>Nouvelle version de l'appli installée.</p>
     <button class="btn btn-small btn-primary" id="btn-reload">Recharger</button>
@@ -533,8 +597,8 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.3.1"></script>
-  <script src="app.js?v=2.3.1"></script>
-  <script src="sync.js?v=2.3.1"></script>
+  <script src="budget.js?v=2.4.0"></script>
+  <script src="app.js?v=2.4.0"></script>
+  <script src="sync.js?v=2.4.0"></script>
 </body>
 </html>

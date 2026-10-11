@@ -476,3 +476,12 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1
 .cat-manage-line input { text-align: right; }
 .tx-label { cursor: pointer; }
 .tx-label.full { color: var(--ink-2); font-size: 13px; }
+
+/* ---------- Ventes, mouvements, bilan (v2.4) ---------- */
+.closed-card { display: block; width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.closed-card .hint { margin: 6px 0 0; }
+.purchase.sale { border-left: 4px solid var(--series-rate); }
+.report-ops .tx-top { font-size: 14px; }
+.report-ops .tx-top b { font-size: 14px; }
+#report-dialog .position-grid { margin-top: 12px; }
+#btn-sell-all { margin-top: 6px; }

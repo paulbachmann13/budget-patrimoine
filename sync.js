@@ -138,7 +138,7 @@ const SyncCore = (() => {
     rules: (x) => `${String(x.match).toLowerCase()}|${x.sign || ''}`,
     categories: (x) => x.name,
   };
-  const PEA_SPECS = { purchases: byId, deposits: byId };
+  const PEA_SPECS = { purchases: byId, deposits: byId, sales: byId, moves: byId };
 
   /** Données complètes : { budget, pea }. base = dernière version synchronisée (ou null). */
   function merge(base, local, remote) {

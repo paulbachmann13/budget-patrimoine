@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.3.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.4.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -141,6 +141,96 @@ const Calc = {
 
   /** Coût total d'un achat (frais inclus). */
   purchaseCost(p) { return p.qty * p.price + (p.fees || 0); },
+
+  /** Montant net reçu pour une vente (frais déduits). */
+  saleProceeds(s) { return s.qty * s.price - (s.fees || 0); },
+
+  /**
+   * Achats et ventes, méthode du PRU (prix de revient moyen pondéré, celle du PEA) :
+   * une vente retire des parts au PRU du moment (frais d'achat inclus) ;
+   * plus-value réalisée = produit net de la vente − coût de ces parts.
+   * @returns {{lots, realized}}
+   *   lots     : achats restants (parts et frais réduits au prorata des ventes) → Calc.portfolio(lots)
+   *   realized : une ligne par vente {id, date, ticker, qty, price, fees, cost, proceeds, gain, pct}
+   */
+  trades(purchases, sales = []) {
+    const lots = purchases.map((p) => ({ p, ticker: Calc.normTicker(p.ticker), factor: 1, done: false }));
+    const events = [
+      ...lots.map((l) => ({ date: l.p.date, buy: l })),
+      ...sales.map((s) => ({ date: s.date, sell: s })),
+    ].sort((a, b) => a.date.localeCompare(b.date) || (a.buy ? -1 : 1)); // le même jour : achats d'abord
+    const book = new Map(); // ticker → { qty, cost }
+    const realized = [];
+    for (const ev of events) {
+      if (ev.buy) {
+        const t = ev.buy.ticker;
+        if (!book.has(t)) book.set(t, { qty: 0, cost: 0 });
+        const b = book.get(t);
+        b.qty += ev.buy.p.qty; b.cost += Calc.purchaseCost(ev.buy.p); ev.buy.done = true;
+        continue;
+      }
+      const s = ev.sell;
+      const t = Calc.normTicker(s.ticker);
+      const b = book.get(t);
+      if (!b || !(b.qty > 1e-9)) continue; // vente sans parts détenues : ignorée (signalée à la saisie)
+      const qty = Math.min(s.qty, b.qty);
+      const ratio = qty / b.qty;
+      const cost = b.cost * ratio;
+      const proceeds = qty * s.price - (s.fees || 0) * (qty / s.qty);
+      realized.push({ id: s.id, date: s.date, ticker: t, qty, price: s.price, fees: s.fees || 0, cost, proceeds, gain: proceeds - cost, pct: cost > 0 ? (proceeds - cost) / cost : 0 });
+      b.cost -= cost; b.qty -= qty;
+      if (b.qty < 1e-9) { b.qty = 0; b.cost = 0; }
+      for (const l of lots) if (l.done && l.ticker === t) l.factor *= 1 - ratio;
+    }
+    const round = (v) => Math.round(v * 1e8) / 1e8;
+    return {
+      lots: lots
+        .filter((l) => l.factor > 1e-9)
+        .map((l) => ({ ...l.p, qty: round(l.p.qty * l.factor), fees: round((l.p.fees || 0) * l.factor) })),
+      realized,
+    };
+  },
+
+  /**
+   * Bilan d'un titre, ouvert ou vendu : durée, argent investi et récupéré, gain,
+   * rendement annualisé, cours sur la période et opérations (pour le graphique).
+   */
+  positionReport(purchases, sales, ticker, prices = {}, histories = {}, todayISO = Dates.today()) {
+    const t = Calc.normTicker(ticker);
+    const buys = purchases.filter((p) => Calc.normTicker(p.ticker) === t);
+    const sells = sales.filter((s) => Calc.normTicker(s.ticker) === t);
+    if (!buys.length) return null;
+    const { lots, realized } = Calc.trades(buys, sells);
+    const pf = Calc.portfolio(lots, prices);
+    const held = lots.reduce((q, l) => q + l.qty, 0);
+    const closed = held < 1e-9;
+    const invested = buys.reduce((s, p) => s + Calc.purchaseCost(p), 0);
+    const received = realized.reduce((s, r) => s + r.proceeds, 0);
+    const value = closed ? 0 : pf.value;
+    const gain = received + value - invested;
+    const start = buys.map((p) => p.date).sort()[0];
+    const end = closed ? realized.map((r) => r.date).sort().pop() : todayISO;
+    const flows = [
+      ...buys.map((p) => ({ date: p.date, amount: -Calc.purchaseCost(p) })),
+      ...realized.map((r) => ({ date: r.date, amount: r.proceeds })),
+      ...(closed ? [] : [{ date: todayISO, amount: value }]),
+    ].sort((a, b) => a.date.localeCompare(b.date));
+    const days = Dates.daysBetween(Dates.parse(start), Dates.parse(end));
+    const h = (Calc.withLatestQuotes(histories, prices)[t] || []).filter((x) => x[0] >= start && x[0] <= end);
+    return {
+      ticker: t, closed, start, end, days,
+      invested, received, value, gain,
+      pct: invested > 0 ? gain / invested : 0,
+      realizedGain: realized.reduce((s, r) => s + r.gain, 0),
+      held, pru: closed ? null : pf.positions[0] && pf.positions[0].pru,
+      xirr: days >= 30 ? Calc.xirr(flows) : null,
+      prices: h,
+      operations: [
+        ...buys.map((p) => ({ type: 'achat', date: p.date, qty: p.qty, price: p.price, amount: -Calc.purchaseCost(p) })),
+        ...realized.map((r) => ({ type: 'vente', date: r.date, qty: r.qty, price: r.price, amount: r.proceeds, gain: r.gain })),
+      ].sort((a, b) => a.date.localeCompare(b.date)),
+    };
+  },
 
   /**
    * Agrège les achats par titre et calcule la performance.
@@ -342,16 +432,21 @@ const Calc = {
    * compte, pas sur les achats. Sans versement saisi, on se rabat sur les
    * achats (frais inclus).
    */
-  deposits(deposits, purchases) {
+  deposits(deposits, purchases, sales = [], moves = []) {
     const spent = purchases.reduce((s, p) => s + Calc.purchaseCost(p), 0);
     const total = deposits.reduce((s, d) => s + d.amount, 0);
     const hasDeposits = deposits.length > 0;
+    // Autres mouvements : ventes (+), régularisations / crédits (+), frais prélevés (−), retraits (−)
+    const proceeds = Calc.trades(purchases, sales).realized.reduce((s, r) => s + r.proceeds, 0);
+    const sum = (kind) => moves.filter((m) => m.kind === kind).reduce((s, m) => s + m.amount, 0);
+    const credits = sum('credit'); const fees = sum('frais'); const withdrawals = sum('retrait');
     return {
       hasDeposits,
       total,
       spent,
-      base: hasDeposits ? total : spent, // montant compté pour le plafond
-      cash: hasDeposits ? total - spent : null,
+      proceeds, credits, fees, withdrawals,
+      base: hasDeposits ? total : spent, // montant compté pour le plafond (versements seulement)
+      cash: hasDeposits ? total + proceeds + credits - spent - fees - withdrawals : null,
     };
   },
 
@@ -392,11 +487,12 @@ const Calc = {
   },
 
   /** TRI du portefeuille : achats (sorties) + valeur actuelle (entrée) à la date du jour. */
-  portfolioXirr(purchases, value, todayISO = Dates.today()) {
+  portfolioXirr(purchases, value, todayISO = Dates.today(), sales = []) {
     if (!purchases.length || !(value > 0)) return null;
-    const flows = purchases
-      .map((p) => ({ date: p.date, amount: -Calc.purchaseCost(p) }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const flows = [
+      ...purchases.map((p) => ({ date: p.date, amount: -Calc.purchaseCost(p) })),
+      ...Calc.trades(purchases, sales).realized.map((r) => ({ date: r.date, amount: r.proceeds })),
+    ].sort((a, b) => a.date.localeCompare(b.date));
     const days = Dates.daysBetween(Dates.parse(flows[0].date), Dates.parse(todayISO));
     return { rate: Calc.xirr([...flows, { date: todayISO, amount: value }]), days };
   },
@@ -500,7 +596,9 @@ const Store = {
       version: 1,
       openingDate: Dates.today(),
       purchases: [],            // [{id, date, ticker, qty, price, fees}]
-      deposits: [],             // versements sur le PEA [{id, date, amount}]
+      deposits: [],             // versements sur le PEA [{id, date, amount}] (comptent pour le plafond)
+      sales: [],                // ventes [{id, date, ticker, qty, price, fees}]
+      moves: [],                // autres mouvements d'argent [{id, date, amount, kind: 'retrait' | 'credit' | 'frais'}]
       prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
       settings: { autoRefresh: true }, // actualisation auto des cours 1×/jour à l'ouverture
@@ -605,6 +703,31 @@ const Store = {
       clean.id = uniqueId(d.id);
       deposits.push(clean);
     });
+    const sales = [];
+    (Array.isArray(data.sales) ? data.sales : []).forEach((s, idx) => {
+      const clean = {
+        id: '', date: String(s && s.date), ticker: Calc.normTicker(s && s.ticker),
+        qty: num(s && s.qty), price: num(s && s.price),
+        fees: s && s.fees !== undefined && s.fees !== null && s.fees !== '' ? num(s.fees) : 0,
+      };
+      if (!Dates.isValidISO(clean.date) || !clean.ticker || !(clean.qty > 0) || !(clean.price > 0) ||
+          !(clean.fees >= 0) || ![clean.qty, clean.price, clean.fees].every(finite)) {
+        errors.push(`Vente n°${idx + 1} invalide.`);
+        return;
+      }
+      clean.id = uniqueId(s.id);
+      sales.push(clean);
+    });
+    const moves = [];
+    (Array.isArray(data.moves) ? data.moves : []).forEach((m, idx) => {
+      const clean = { id: '', date: String(m && m.date), amount: num(m && m.amount), kind: m && m.kind };
+      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0) || !finite(clean.amount) || !['retrait', 'credit', 'frais'].includes(clean.kind)) {
+        errors.push(`Mouvement n°${idx + 1} invalide.`);
+        return;
+      }
+      clean.id = uniqueId(m.id);
+      moves.push(clean);
+    });
     const prices = {};
     for (const [t, q] of Object.entries(data.prices && typeof data.prices === 'object' ? data.prices : {})) {
       const price = num(q && q.price);
@@ -644,6 +767,8 @@ const Store = {
         openingDate: Dates.isValidISO(data.openingDate) ? data.openingDate : def.openingDate,
         purchases,
         deposits,
+        sales,
+        moves,
         prices,
         instruments,
         settings: { autoRefresh: !(data.settings && data.settings.autoRefresh === false) },
@@ -1173,6 +1298,7 @@ const App = {
     App.applyTheme();
     App.bindNavigation();
     App.bindPurchases();
+    App.bindSales();
     App.bindPlanner();
     App.bindSimulator();
     App.bindPea();
@@ -1272,6 +1398,12 @@ const App = {
 
   persist() { Store.save(App.state); },
 
+  /** Achats encore détenus (ventes déduites au PRU) : base des positions, graphiques et valeur. */
+  lots() { return Calc.trades(App.state.purchases, App.state.sales).lots; },
+
+  /** Liquidités du PEA : versements, ventes, régularisations, frais, retraits, achats. */
+  cashInfo() { return Calc.deposits(App.state.deposits, App.state.purchases, App.state.sales, App.state.moves); },
+
   debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; },
 
   toast(msg) {
@@ -1317,7 +1449,7 @@ const App = {
 
   /* ---------- Tableau de bord ---------- */
   renderDashboard() {
-    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const pf = Calc.portfolio(App.lots(), App.state.prices);
     const cls = Fmt.trend;
 
     document.getElementById('kpi-value').textContent = Fmt.eur(pf.value);
@@ -1337,7 +1469,7 @@ const App = {
     document.getElementById('kpi-qty').textContent = Fmt.num(pf.qty);
 
     // Rendement annualisé (TRI) : n'a de sens qu'après quelques semaines
-    const xr = Calc.portfolioXirr(App.state.purchases, pf.value);
+    const xr = Calc.portfolioXirr(App.state.purchases, pf.value, Dates.today(), App.state.sales);
     const xEl = document.getElementById('kpi-xirr');
     const xHint = document.getElementById('kpi-xirr-hint');
     if (!xr) {
@@ -1352,7 +1484,7 @@ const App = {
     }
 
     // Cash disponible = versements − achats
-    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const dep = App.cashInfo();
     const cashEl = document.getElementById('kpi-cash');
     const cashHint = document.getElementById('kpi-cash-hint');
     if (dep.hasDeposits) {
@@ -1379,6 +1511,9 @@ const App = {
     warn.textContent = pf.missingQuotes.length
       ? `Pas de cours pour ${pf.missingQuotes.join(', ')} : valorisé au dernier prix d'achat. Touchez « Actualiser le cours ».`
       : '';
+
+    App.renderClosed();
+    const { realized } = Calc.trades(App.state.purchases, App.state.sales);
 
     // Une carte par titre, avec saisie du cours actuel.
     // Si l'utilisateur est en train de taper un cours, on le restaure après le rendu.
@@ -1407,6 +1542,11 @@ const App = {
           <div>Valeur<b data-f="value"></b></div>
         </div>
         <p class="hint position-net" data-f="net"></p>
+        <p class="hint" data-f="realized" hidden></p>
+        <div class="purchase-actions">
+          <button class="btn" type="button" data-a="sell">Vendre</button>
+          <button class="btn" type="button" data-a="report">Bilan</button>
+        </div>
         <div class="perf-box">
           <p class="label">Ma performance</p>
           <div class="chart chart-small" data-f="perf" role="img"></div>
@@ -1454,6 +1594,17 @@ const App = {
         App.liveStatus[pos.ticker] = { code: 'change' };
         App.renderDashboard();
       });
+      // Ventes partielles : plus-value déjà encaissée
+      const real = realized.filter((r) => r.ticker === pos.ticker);
+      const realEl = card.querySelector('[data-f=realized]');
+      realEl.hidden = !real.length;
+      if (real.length) {
+        const g = real.reduce((s, r) => s + r.gain, 0);
+        realEl.textContent = `Plus-value réalisée (${real.length} vente${real.length > 1 ? 's' : ''}) : ${Fmt.signedEur(g)}`;
+        realEl.className = 'hint ' + cls(g);
+      }
+      card.querySelector('[data-a=sell]').addEventListener('click', () => App.openSale(pos.ticker));
+      card.querySelector('[data-a=report]').addEventListener('click', () => App.openReport(pos.ticker));
       card.querySelector('[data-f=qty]').textContent = Fmt.num(pos.qty);
       card.querySelector('[data-f=pru]').textContent = Fmt.unitPrice(pos.pruGross);
       card.querySelector('[data-f=invested]').textContent = Fmt.eur(pos.invested);
@@ -1620,7 +1771,7 @@ const App = {
 
   /** Actualise tous les titres, l'un après l'autre (pour ménager Euronext). */
   async refreshAllLive({ silent = false, force = true } = {}) {
-    const tickers = Calc.portfolio(App.state.purchases).positions.map((p) => p.ticker);
+    const tickers = Calc.portfolio(App.lots()).positions.map((p) => p.ticker);
     let ok = 0;
     for (const t of tickers) if (await App.refreshLive(t, { force })) ok++;
     if (!silent && tickers.length) {
@@ -1667,7 +1818,7 @@ const App = {
     if (el.offsetParent === null) return; // vue masquée
 
     // Avec l'historique des cours : valeur réelle vs versements, jour par jour
-    const vs = Calc.valueSeries(App.state.purchases, App.histories);
+    const vs = Calc.valueSeries(App.lots(), App.histories);
     document.getElementById('legend-value').hidden = vs.length < 2;
     document.getElementById('chart-cumul-legend').hidden = vs.length < 2;
     document.getElementById('chart-cumul-title').textContent = vs.length >= 2 ? 'Valeur et versements' : 'Versements cumulés';
@@ -1691,7 +1842,7 @@ const App = {
     }
 
     // Sinon : versements cumulés seuls
-    const pts = Calc.cumulativeSeries(App.state.purchases);
+    const pts = Calc.cumulativeSeries(App.lots());
     drawChart(el, {
       xs: pts.map((p) => Dates.parse(p.date).getTime()),
       series: [{ name: 'Versé', color: '--series-invested', values: pts.map((p) => p.total), area: true }],
@@ -1732,7 +1883,7 @@ const App = {
   renderPerfCharts() {
     if (document.getElementById('view-dashboard').hidden) return; // vue masquée : pas de largeur à mesurer
     const hist = Calc.withLatestQuotes(App.histories, App.state.prices);
-    const purchases = App.state.purchases;
+    const purchases = App.lots();
 
     // Un graphique par titre
     document.querySelectorAll('#positions [data-f=perf]').forEach((el) => {
@@ -1856,11 +2007,233 @@ const App = {
     App.toast('Achat supprimé');
   },
 
+  /* ---------- Ventes ---------- */
+  bindSales() {
+    const dlg = document.getElementById('sale-dialog');
+    const form = document.getElementById('sale-form');
+    document.getElementById('sale-cancel').addEventListener('click', () => dlg.close());
+    form.addEventListener('input', App.updateSaleTotal);
+    form.ticker.addEventListener('change', App.updateSaleTotal);
+    document.getElementById('btn-sell-all').addEventListener('click', () => {
+      form.qty.value = Fmt.input(App.heldQty(form.ticker.value, form.date.value, form.id.value));
+      App.updateSaleTotal();
+    });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (App.saveSale()) dlg.close();
+    });
+    document.getElementById('report-close').addEventListener('click', () => document.getElementById('report-dialog').close());
+  },
+
+  /** Parts détenues d'un titre à une date (hors la vente en cours de modification). */
+  heldQty(ticker, dateISO, exceptSaleId = '') {
+    const t = Calc.normTicker(ticker);
+    const upTo = (x) => !dateISO || x.date <= dateISO;
+    const sales = App.state.sales.filter((s) => s.id !== exceptSaleId && upTo(s));
+    const lots = Calc.trades(App.state.purchases.filter(upTo), sales).lots;
+    return Math.round(lots.filter((l) => Calc.normTicker(l.ticker) === t).reduce((q, l) => q + l.qty, 0) * 1e6) / 1e6;
+  },
+
+  openSale(ticker, sale = null) {
+    const form = document.getElementById('sale-form');
+    const tickers = [...new Set([...Calc.portfolio(App.lots()).positions.map((p) => p.ticker), ...(sale ? [sale.ticker] : [])])];
+    form.ticker.replaceChildren();
+    tickers.forEach((t) => { const o = document.createElement('option'); o.value = t; o.textContent = t; form.ticker.appendChild(o); });
+    form.id.value = sale ? sale.id : '';
+    form.ticker.value = sale ? sale.ticker : ticker;
+    form.date.value = sale ? sale.date : Dates.today();
+    form.qty.value = sale ? Fmt.input(sale.qty) : '';
+    const q = App.state.prices[form.ticker.value];
+    form.price.value = sale ? Fmt.input(sale.price) : (q && q.price > 0 ? Fmt.input(q.price) : '');
+    form.fees.value = sale ? Fmt.input(sale.fees) : '';
+    document.getElementById('sale-dialog-title').textContent = sale ? 'Modifier la vente' : `Vendre ${form.ticker.value}`;
+    document.getElementById('sale-error').hidden = true;
+    App.updateSaleTotal();
+    document.getElementById('sale-dialog').showModal();
+  },
+
+  readSaleForm() {
+    const f = document.getElementById('sale-form');
+    return {
+      id: f.id.value || Store.newId(),
+      date: f.date.value,
+      ticker: Calc.normTicker(f.ticker.value),
+      qty: Calc.parseNumber(f.qty.value),
+      price: Calc.parseNumber(f.price.value),
+      fees: Calc.parseNumber(f.fees.value, true),
+    };
+  },
+
+  updateSaleTotal() {
+    const s = App.readSaleForm();
+    const held = App.heldQty(s.ticker, Dates.isValidISO(s.date) ? s.date : '', document.getElementById('sale-form').id.value);
+    document.getElementById('sale-held').textContent = `${Fmt.num(held)} part${held > 1 ? 's' : ''} détenue${held > 1 ? 's' : ''} à cette date.`;
+    const el = document.getElementById('sale-total');
+    if (!(s.qty > 0 && s.price > 0 && s.fees >= 0)) { el.textContent = ''; return; }
+    // Plus-value estimée au PRU du moment
+    const sim = Calc.trades(App.state.purchases, [...App.state.sales.filter((x) => x.id !== s.id), s]).realized.find((r) => r.id === s.id);
+    el.textContent = `Montant reçu : ${Fmt.eur(Calc.saleProceeds(s))}` + (sim ? ` · plus-value ${Fmt.signedEur(sim.gain)} (${Fmt.signedPct(sim.pct)})` : '');
+  },
+
+  saveSale() {
+    const s = App.readSaleForm();
+    const err = document.getElementById('sale-error');
+    const held = App.heldQty(s.ticker, s.date, document.getElementById('sale-form').id.value);
+    let msg = '';
+    if (!Dates.isValidISO(s.date)) msg = 'Date invalide.';
+    else if (!(s.qty > 0)) msg = 'Nombre de parts invalide.';
+    else if (s.qty > held + 1e-6) msg = `Vous ne déteniez que ${Fmt.num(held)} part(s) de ${s.ticker} à cette date.`;
+    else if (!(s.price > 0)) msg = 'Prix de vente invalide.';
+    else if (!(s.fees >= 0)) msg = 'Frais invalides.';
+    if (msg) { err.textContent = msg; err.hidden = false; return false; }
+    const i = App.state.sales.findIndex((x) => x.id === s.id);
+    if (i >= 0) App.state.sales[i] = s; else App.state.sales.push(s);
+    App.persist();
+    App.renderAll();
+    const closed = App.heldQty(s.ticker) < 1e-6;
+    App.toast(i >= 0 ? 'Vente modifiée' : closed ? `Position ${s.ticker} clôturée : voir le bilan` : 'Vente enregistrée');
+    if (closed && i < 0) setTimeout(() => App.openReport(s.ticker), 300);
+    return true;
+  },
+
+  deleteSale(id) {
+    const s = App.state.sales.find((x) => x.id === id);
+    if (!s || !confirm(`Supprimer la vente ${s.ticker} du ${Fmt.date(s.date)} ?`)) return;
+    App.state.sales = App.state.sales.filter((x) => x.id !== id);
+    App.persist();
+    App.renderAll();
+    App.toast('Vente supprimée');
+  },
+
+  /* ---------- Positions vendues et bilan ---------- */
+  renderClosed() {
+    const box = document.getElementById('closed-positions');
+    box.replaceChildren();
+    const held = new Set(Calc.portfolio(App.lots()).positions.map((p) => p.ticker));
+    const tickers = [...new Set(App.state.sales.map((s) => Calc.normTicker(s.ticker)))].filter((t) => !held.has(t));
+    const reports = tickers.map((t) => Calc.positionReport(App.state.purchases, App.state.sales, t, App.state.prices, App.histories)).filter(Boolean)
+      .sort((a, b) => b.end.localeCompare(a.end));
+    document.getElementById('closed-title').hidden = !reports.length;
+    for (const r of reports) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'card closed-card';
+      const head = document.createElement('div'); head.className = 'position-head';
+      const name = document.createElement('strong'); name.textContent = r.ticker;
+      const g = document.createElement('span'); g.className = Fmt.trend(r.gain); g.textContent = `${Fmt.signedEur(r.gain)} · ${Fmt.signedPct(r.pct)}`;
+      head.append(name, g);
+      const meta = document.createElement('p'); meta.className = 'hint';
+      meta.textContent = `Du ${Fmt.date(r.start)} au ${Fmt.date(r.end)} · ${App.fmtDuration(r.days)} · investi ${Fmt.eur(r.invested)}, récupéré ${Fmt.eur(r.received)} · voir le bilan ›`;
+      card.append(head, meta);
+      card.addEventListener('click', () => App.openReport(r.ticker));
+      box.appendChild(card);
+    }
+  },
+
+  fmtDuration(days) {
+    if (days < 31) return `${days} jour${days > 1 ? 's' : ''}`;
+    const months = Math.round(days / 30.44);
+    if (months < 12) return `${months} mois`;
+    const y = Math.floor(months / 12); const m = months % 12;
+    return `${y} an${y > 1 ? 's' : ''}${m ? ` ${m} mois` : ''}`;
+  },
+
+  openReport(ticker) {
+    const r = Calc.positionReport(App.state.purchases, App.state.sales, ticker, App.state.prices, App.histories);
+    if (!r) return;
+    const $ = (id) => document.getElementById(id);
+    $('report-title').textContent = `Bilan ${r.ticker}` + (r.closed ? ' (vendu)' : ' (en cours)');
+    $('report-period').textContent = `Du ${Fmt.date(r.start)} au ${r.closed ? Fmt.date(r.end) : 'aujourd\'hui'} · ${App.fmtDuration(r.days)}`;
+    $('report-gain').textContent = Fmt.signedEur(r.gain);
+    $('report-gain').className = 'hero-value ' + Fmt.trend(r.gain);
+    $('report-gain-pct').textContent = `${Fmt.signedPct(r.pct)} sur l'argent investi` + (r.closed ? '' : ' (plus-value latente comprise)');
+    $('report-gain-pct').className = 'hero-delta ' + Fmt.trend(r.gain);
+    const grid = $('report-grid');
+    grid.replaceChildren();
+    const cells = [
+      ['Investi (frais inclus)', Fmt.eur(r.invested)],
+      ['Récupéré (ventes)', Fmt.eur(r.received)],
+      ...(r.closed ? [] : [['Valeur des parts restantes', Fmt.eur(r.value)], ['Parts restantes', Fmt.num(r.held)]]),
+      ['Plus-value réalisée', Fmt.signedEur(r.realizedGain)],
+      ['Rendement annualisé', r.xirr === null ? (r.days < 30 ? 'après 1 mois' : '—') : Fmt.signedPct(r.xirr)],
+    ];
+    for (const [k, v] of cells) {
+      const d = document.createElement('div'); d.textContent = k;
+      const b = document.createElement('b'); b.textContent = v;
+      d.appendChild(b); grid.appendChild(d);
+    }
+    const ops = $('report-ops');
+    ops.replaceChildren();
+    for (const o of r.operations) {
+      const row = document.createElement('div'); row.className = 'tx-top';
+      const l = document.createElement('span');
+      l.textContent = `${Fmt.date(o.date)} · ${o.type === 'achat' ? 'Achat' : 'Vente'} ${Fmt.num(o.qty)} × ${Fmt.unitPrice(o.price)}`;
+      const a = document.createElement('b');
+      a.textContent = Fmt.signedEur(o.amount) + (o.type === 'vente' ? ` (PV ${Fmt.signedEur(o.gain)})` : '');
+      a.className = Fmt.trend(o.amount);
+      row.append(l, a); ops.appendChild(row);
+    }
+    $('report-dialog').showModal();
+    App.renderReportChart(r);
+  },
+
+  /** Cours du titre sur la période, avec les achats (vert) et les ventes (orange). */
+  renderReportChart(r) {
+    const el = document.getElementById('report-chart');
+    const hint = document.getElementById('report-chart-hint');
+    el.innerHTML = '';
+    const pts = r.prices.length >= 2 ? r.prices : null;
+    el.hidden = !pts;
+    hint.hidden = !!pts;
+    if (!pts) { hint.textContent = 'Pas d\'historique de cours pour ce titre sur la période : touchez « Actualiser le cours » quand le titre est encore détenu.'; return; }
+    const W = el.clientWidth || 320; const H = el.clientHeight || 150;
+    const m = { top: 10, right: 10, bottom: 22, left: 10 };
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' }, el);
+    const t0 = Dates.parse(pts[0][0]).getTime(); const t1 = Dates.parse(pts[pts.length - 1][0]).getTime() || t0 + 1;
+    const vals = [...pts.map((p) => p[1]), ...r.operations.map((o) => o.price)];
+    let lo = Math.min(...vals); let hi = Math.max(...vals);
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const sx = (iso) => m.left + ((Dates.parse(iso).getTime() - t0) / Math.max(1, t1 - t0)) * (W - m.left - m.right);
+    const sy = (v) => m.top + (1 - (v - lo) / (hi - lo)) * (H - m.top - m.bottom);
+    svgEl('polyline', { points: pts.map((p) => `${sx(p[0])},${sy(p[1])}`).join(' '), fill: 'none', style: 'stroke: var(--series-invested); stroke-width: 2' }, svg);
+    for (const o of r.operations) {
+      if (o.date < pts[0][0] || o.date > pts[pts.length - 1][0]) continue;
+      const c = svgEl('circle', { cx: sx(o.date), cy: sy(o.price), r: 5, style: `fill: var(${o.type === 'achat' ? '--series-gains' : '--series-rate'}); stroke: var(--surface); stroke-width: 2` }, svg);
+      const tip = svgEl('title', {}, c); tip.textContent = `${o.type === 'achat' ? 'Achat' : 'Vente'} le ${Fmt.date(o.date)} à ${Fmt.unitPrice(o.price)}`;
+    }
+    const tick = (iso, anchor, x) => { const t = svgEl('text', { x, y: H - 6, 'text-anchor': anchor, class: 'tick' }, svg); t.textContent = Fmt.date(iso).slice(0, 5) + '/' + iso.slice(2, 4); };
+    tick(pts[0][0], 'start', m.left); tick(pts[pts.length - 1][0], 'end', W - m.right);
+    svgEl('line', { x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom, class: 'baseline' }, svg);
+  },
+
   renderPurchases() {
     const list = document.getElementById('purchase-list');
     const sorted = App.state.purchases.slice().sort((a, b) => b.date.localeCompare(a.date));
     document.getElementById('purchase-empty').hidden = sorted.length > 0;
     list.replaceChildren();
+    // Ventes (en tête de liste, du plus récent au plus ancien)
+    const { realized } = Calc.trades(App.state.purchases, App.state.sales);
+    for (const s of App.state.sales.slice().sort((a, b) => b.date.localeCompare(a.date))) {
+      const r = realized.find((x) => x.id === s.id);
+      const card = document.createElement('div');
+      card.className = 'card purchase sale';
+      card.innerHTML = `
+        <div class="purchase-top"><strong></strong><strong data-f="total"></strong></div>
+        <div class="purchase-meta"></div>
+        <div class="purchase-actions">
+          <button class="btn" data-a="edit">Modifier</button>
+          <button class="btn btn-danger" data-a="del">Supprimer</button>
+        </div>`;
+      card.querySelector('.purchase-top strong').textContent = `Vente ${s.ticker} · ${Fmt.date(s.date)}`;
+      const tot = card.querySelector('[data-f=total]');
+      tot.textContent = Fmt.signedEur(Calc.saleProceeds(s));
+      tot.className = 'pos';
+      card.querySelector('.purchase-meta').textContent =
+        `${Fmt.num(s.qty)} part${s.qty > 1 ? 's' : ''} × ${Fmt.unitPrice(s.price)} · frais ${Fmt.eur(s.fees)}` + (r ? ` · plus-value ${Fmt.signedEur(r.gain)}` : '');
+      card.querySelector('[data-a=edit]').addEventListener('click', () => App.openSale(s.ticker, s));
+      card.querySelector('[data-a=del]').addEventListener('click', () => App.deleteSale(s.id));
+      list.appendChild(card);
+    }
     for (const p of sorted) {
       const card = document.createElement('div');
       card.className = 'card purchase';
@@ -2052,7 +2425,7 @@ const App = {
     if (!App.state.sim.useReal) return null;
     const pace = Calc.realPace(App.state.purchases);
     if (!pace) return null;
-    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const pf = Calc.portfolio(App.lots(), App.state.prices);
     return { pace, monthly: Math.round(pace.monthly), initial: Math.round(pf.value * 100) / 100, initialInvested: pf.invested, pf };
   },
 
@@ -2119,9 +2492,9 @@ const App = {
     card.hidden = !pace;
     if (!pace) return;
     const s = App.state.sim;
-    const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const pf = Calc.portfolio(App.lots(), App.state.prices);
     const today = Dates.today();
-    const expected = Calc.valueAtRate(App.state.purchases, s.rate, s.ter, today);
+    const expected = Calc.valueAtRate(App.lots(), s.rate, s.ter, today);
     const diff = pf.value - expected;
     const diffPct = expected > 0 ? diff / expected : 0;
     const rateTxt = `${Fmt.num(s.rate)} %`;
@@ -2145,7 +2518,7 @@ const App = {
     }
 
     const net = Calc.netRate(s.rate, s.ter);
-    const xr = Calc.portfolioXirr(App.state.purchases, pf.value);
+    const xr = Calc.portfolioXirr(App.state.purchases, pf.value, Dates.today(), App.state.sales);
     document.getElementById('real-xirr').textContent = xr && xr.rate !== null && xr.days >= 30
       ? `Rendement réel annualisé : ${Fmt.signedPct(xr.rate)}/an, contre ${Fmt.signedPct(net)}/an dans l'hypothèse (${rateTxt} − frais ${Fmt.num(s.ter)} %).${xr.days < 365 ? ' Moins d\'un an de recul : à prendre avec prudence.' : ''}`
       : `Hypothèse : ${Fmt.signedPct(net)}/an net de frais. Rendement réel annualisé disponible après 1 mois.`;
@@ -2160,12 +2533,12 @@ const App = {
     const box = document.getElementById('real-chart-box');
     const hint = document.getElementById('real-chart-hint');
     if (document.getElementById('real-card').hidden) return;
-    const vs = Calc.valueSeries(App.state.purchases, App.histories);
+    const vs = Calc.valueSeries(App.lots(), App.histories);
     box.hidden = vs.length < 2;
     hint.hidden = vs.length >= 2;
     if (vs.length < 2 || el.offsetParent === null) return;
     const s = App.state.sim;
-    const pts = vs.map((p) => ({ ...p, atRate: Calc.valueAtRate(App.state.purchases, s.rate, s.ter, p.date) }));
+    const pts = vs.map((p) => ({ ...p, atRate: Calc.valueAtRate(App.lots(), s.rate, s.ter, p.date) }));
     drawChart(el, {
       xs: pts.map((p) => Dates.parse(p.date).getTime()),
       series: [
@@ -2222,12 +2595,24 @@ const App = {
       App.renderPea();
     });
 
-    // Versements
+    // Argent sur le PEA : versements (plafond) et autres mouvements
     const df = document.getElementById('deposit-form');
     df.date.value = Dates.today();
+    const kindHint = () => {
+      const h = {
+        versement: 'Virement du compte courant vers le PEA : compte pour le plafond de 150 000 €.',
+        credit: 'Ajoute de l\'argent sur le PEA sans compter pour le plafond (ex. régularisation de frais de bourse de 2,20 €).',
+        frais: 'Retire de l\'argent du PEA (droits de garde, frais de tenue…).',
+        retrait: 'Avant 5 ans, un retrait entraîne en principe la clôture du PEA (sauf cas prévus par la loi). Après 5 ans, les retraits partiels sont possibles.',
+      };
+      document.getElementById('deposit-kind-hint').textContent = h[df.kind.value];
+    };
+    df.kind.addEventListener('change', kindHint);
+    kindHint();
     df.addEventListener('submit', (e) => {
       e.preventDefault();
       const amount = Calc.parseNumber(df.amount.value);
+      const kind = df.kind.value;
       const err = document.getElementById('deposit-error');
       if (!Dates.isValidISO(df.date.value) || !(amount > 0)) {
         err.textContent = 'Date ou montant invalide.';
@@ -2235,11 +2620,14 @@ const App = {
         return;
       }
       err.hidden = true;
-      App.state.deposits.push({ id: Store.newId(), date: df.date.value, amount });
+      if (kind === 'retrait' && !Calc.peaCountdown(App.state.openingDate, df.date.value).reached &&
+          !confirm('Ce retrait a lieu avant les 5 ans du PEA : en principe, cela entraîne sa clôture. L\'enregistrer quand même ?')) return;
+      if (kind === 'versement') App.state.deposits.push({ id: Store.newId(), date: df.date.value, amount });
+      else App.state.moves.push({ id: Store.newId(), date: df.date.value, amount, kind });
       App.persist();
       df.amount.value = '';
       App.renderAll();
-      App.toast('Versement ajouté');
+      App.toast({ versement: 'Versement ajouté', credit: 'Crédit ajouté', frais: 'Frais ajoutés', retrait: 'Retrait ajouté' }[kind]);
     });
 
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
@@ -2280,7 +2668,7 @@ const App = {
       : `Échéance le ${Fmt.date(c.targetISO)} (${Fmt.num(c.daysLeft)} jours). ${Fmt.pct(c.progress)} du chemin.`;
     document.getElementById('pea-gauge-time').style.width = (c.progress * 100) + '%';
 
-    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const dep = App.cashInfo();
     const ce = Calc.ceiling(dep.base);
     document.getElementById('pea-ceiling-source').textContent = dep.hasDeposits
       ? 'Calculé sur vos versements.'
@@ -2291,31 +2679,49 @@ const App = {
     document.getElementById('pea-ceiling-left').textContent = `Encore ${Fmt.eur0(ce.remaining)} de versements possibles (${Fmt.pct(ce.progress)} utilisé).`;
   },
 
+  MOVE_LABELS: { versement: 'Versement', credit: 'Crédit / régularisation', frais: 'Frais', retrait: 'Retrait' },
+
   renderDeposits() {
     const list = document.getElementById('deposit-list');
     list.replaceChildren();
-    const sorted = App.state.deposits.slice().sort((a, b) => b.date.localeCompare(a.date));
-    for (const d of sorted) {
+    const items = [
+      ...App.state.deposits.map((d) => ({ ...d, kind: 'versement', list: 'deposits' })),
+      ...App.state.moves.map((m) => ({ ...m, list: 'moves' })),
+    ].sort((a, b) => b.date.localeCompare(a.date));
+    for (const d of items) {
+      const sign = d.kind === 'frais' || d.kind === 'retrait' ? -1 : 1;
       const row = document.createElement('div');
       row.className = 'deposit';
       const date = document.createElement('span');
-      date.textContent = Fmt.date(d.date);
+      date.textContent = `${Fmt.date(d.date)} · ${App.MOVE_LABELS[d.kind]}`;
       const amount = document.createElement('b');
-      amount.textContent = Fmt.eur(d.amount);
+      amount.textContent = Fmt.signedEur(sign * d.amount);
+      amount.className = sign < 0 ? 'neg' : '';
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'btn btn-danger';
-      del.setAttribute('aria-label', `Supprimer le versement du ${Fmt.date(d.date)}`);
+      del.setAttribute('aria-label', `Supprimer : ${App.MOVE_LABELS[d.kind]} du ${Fmt.date(d.date)}`);
       del.textContent = '✕';
       del.addEventListener('click', () => {
-        if (!confirm(`Supprimer le versement de ${Fmt.eur(d.amount)} du ${Fmt.date(d.date)} ?`)) return;
-        App.state.deposits = App.state.deposits.filter((x) => x.id !== d.id);
+        if (!confirm(`Supprimer : ${App.MOVE_LABELS[d.kind].toLowerCase()} de ${Fmt.eur(d.amount)} du ${Fmt.date(d.date)} ?`)) return;
+        App.state[d.list] = App.state[d.list].filter((x) => x.id !== d.id);
         App.persist();
         App.renderAll();
       });
       row.append(date, amount, del);
       list.appendChild(row);
     }
+    // Résumé des liquidités
+    const c = App.cashInfo();
+    const parts = [`versé ${Fmt.eur(c.total)}`];
+    if (c.proceeds) parts.push(`ventes +${Fmt.eur(c.proceeds)}`);
+    if (c.credits) parts.push(`crédits +${Fmt.eur(c.credits)}`);
+    parts.push(`achats −${Fmt.eur(c.spent)}`);
+    if (c.fees) parts.push(`frais −${Fmt.eur(c.fees)}`);
+    if (c.withdrawals) parts.push(`retraits −${Fmt.eur(c.withdrawals)}`);
+    document.getElementById('cash-summary').textContent = c.hasDeposits
+      ? `Liquidités disponibles : ${Fmt.eur(c.cash)} (${parts.join(', ')}).`
+      : '';
   },
 
   /**
