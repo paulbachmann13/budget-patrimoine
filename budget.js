@@ -453,7 +453,7 @@ const BudgetCore = (() => {
     });
     if (pea && pea.amount) {
       const blocked = !!pea.until && pea.until > today;
-      items.push({ name: 'PEA', amount: pea.amount, blocked, until: blocked ? pea.until : '', pea: true });
+      items.push({ name: pea.bank ? `PEA (${pea.bank})` : 'PEA', amount: pea.amount, blocked, until: blocked ? pea.until : '', pea: true });
     }
     const round = (v) => Math.round(v * 100) / 100;
     const available = round(items.filter((i) => !i.blocked).reduce((s, i) => s + i.amount, 0));
@@ -1319,7 +1319,9 @@ const Budget = {
     // Liste des comptes
     const box = Budget.$('p-accounts');
     box.replaceChildren();
-    const groups = BudgetCore.groupAccounts(accounts);
+    // Le PEA (calculé) rejoint le groupe de sa banque
+    const peaRow = pea.total || App.state.bank ? [{ id: '__pea', name: 'PEA', bank: App.state.bank, balance: pea.total, pea: true }] : [];
+    const groups = BudgetCore.groupAccounts([...accounts, ...peaRow]);
     const showHeads = groups.length > 1 || (groups[0] && groups[0].bank);
     groups.forEach((g) => {
       if (showHeads) {
@@ -1328,9 +1330,9 @@ const Budget = {
         const t = document.createElement('b'); t.textContent = Fmt.eur(g.total);
         head.append(n, t); box.appendChild(head);
       }
-      g.accounts.forEach((a) => Budget.renderAccount(box, a));
+      g.accounts.forEach((a) => (a.pea ? Budget.renderPeaAccount(box, a) : Budget.renderAccount(box, a)));
     });
-    Budget.$('p-accounts-empty').hidden = accounts.length > 0;
+    Budget.$('p-accounts-empty').hidden = accounts.length > 0 || peaRow.length > 0;
     Budget.renderBankList();
 
     // Reprise des données du Suivi PEA d'origine (même navigateur) si la copie est vide
@@ -1365,25 +1367,45 @@ const Budget = {
         if (sel.value !== '__other') { sel.dataset.last = sel.value; return; }
         const name = (prompt('Nom de la banque :') || '').trim().slice(0, 40);
         Budget.fillBankSelect(sel, name || sel.dataset.last || '');
+        if (name) sel.dispatchEvent(new Event('change')); // le nom saisi est le nouveau choix
       });
     }
     sel.dataset.last = sel.value;
   },
 
   /** Fenêtre « Changer la banque » d'un compte existant. */
-  pickBank(a) {
+  pickBank(a, save = (bank) => { a.bank = bank; Budget.persist(); Budget.renderPatrimoine(); }) {
     const dlg = Budget.$('bank-dialog');
     const sel = Budget.$('bank-dialog-select');
     Budget.$('bank-dialog-title').textContent = `Banque de « ${a.name} »`;
     Budget.fillBankSelect(sel, a.bank || '');
     const ok = Budget.$('bank-dialog-ok');
     const onOk = () => {
-      if (sel.value !== '__other') { a.bank = sel.value; Budget.persist(); Budget.renderPatrimoine(); }
+      if (sel.value !== '__other') save(sel.value);
       dlg.close();
     };
     ok.onclick = onOk;
     Budget.$('bank-dialog-cancel').onclick = () => dlg.close();
     dlg.showModal();
+  },
+
+  /** Le PEA dans « Mes comptes » : valeur calculée (non modifiable), banque modifiable. */
+  renderPeaAccount(box, a) {
+    const row = document.createElement('div'); row.className = 'account-row';
+    const name = document.createElement('button');
+    name.type = 'button'; name.className = 'account-name';
+    name.textContent = 'PEA';
+    name.setAttribute('aria-label', 'PEA : changer la banque');
+    name.addEventListener('click', () => Budget.pickBank(a, (bank) => { App.state.bank = bank; App.persist(); App.renderAll(); }));
+    const val = document.createElement('b'); val.className = 'account-auto'; val.textContent = Fmt.eur(a.balance);
+    row.append(name, val);
+    box.appendChild(row);
+    const meta = document.createElement('div'); meta.className = 'account-meta';
+    const d = document.createElement('span'); d.className = 'hint';
+    const c = Calc.peaCountdown(App.state.openingDate);
+    d.textContent = `calculé depuis l'onglet PEA · ${c.reached ? 'disponible' : `bloqué jusqu'au ${Fmt.date(c.targetISO)}`}`;
+    meta.appendChild(d);
+    box.appendChild(meta);
   },
 
   /** Un compte : nom (touche = changer de banque), solde modifiable, disponibilité. */
@@ -1429,7 +1451,7 @@ const Budget = {
   /** Argent disponible tout de suite / bloqué (PEA avant 5 ans, PEL, CEL…). */
   renderAvailability(peaAmount) {
     const until = App.state.openingDate ? Calc.peaCountdown(App.state.openingDate).targetISO : '';
-    const av = BudgetCore.availability(Budget.state.accounts, { amount: peaAmount, until }, Dates.today());
+    const av = BudgetCore.availability(Budget.state.accounts, { amount: peaAmount, until, bank: App.state.bank }, Dates.today());
     Budget.$('p-available').textContent = Fmt.eur(av.available);
     Budget.$('p-blocked').textContent = Fmt.eur(av.blocked);
     const bar = Budget.$('p-avail-bar');

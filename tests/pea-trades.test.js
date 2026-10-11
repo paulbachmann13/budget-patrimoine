@@ -97,5 +97,6 @@ test('stockage : ventes et mouvements validés et conservés', () => {
   assert.equal(errors.length, 2);
   // Anciennes sauvegardes (Suivi PEA d'origine) : listes vides
   const old = Store.clean({ purchases: [] }).state;
-  assert.deepEqual([old.sales, old.moves], [[], []]);
+  assert.deepEqual([old.sales, old.moves, old.bank], [[], [], '']);
+  assert.equal(Store.clean({ purchases: [], bank: '  BforBank ' }).state.bank, 'BforBank');
 });

@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.6.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.7.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -607,6 +607,7 @@ const Store = {
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
       lastExport: null,         // date du dernier export JSON
       theme: 'dark',
+      bank: '',                 // banque où est ouvert le PEA (affichée dans Patrimoine)
     };
   },
 
@@ -777,6 +778,7 @@ const Store = {
         plan,
         lastExport: Dates.isValidISO(data.lastExport) ? data.lastExport : null,
         theme: data.theme === 'light' ? 'light' : 'dark',
+        bank: String(data.bank || '').trim().slice(0, 40),
       },
       errors,
       dropped: errors.length,
@@ -2586,6 +2588,14 @@ const App = {
 
   /* ---------- PEA : 5 ans, plafond, sauvegarde, thème ---------- */
   bindPea() {
+    // Banque du PEA (le menu est rempli par renderPea, une fois le budget chargé)
+    const pb = document.getElementById('pea-bank');
+    pb.addEventListener('change', () => {
+      if (pb.value === '__other') return; // « Autre… » : le nom saisi déclenche un nouveau change
+      App.state.bank = pb.value;
+      App.persist();
+      App.renderAll();
+    });
     const od = document.getElementById('opening-date');
     od.value = App.state.openingDate;
     od.addEventListener('change', () => {
@@ -2656,6 +2666,8 @@ const App = {
   },
 
   renderPea() {
+    const pb = document.getElementById('pea-bank');
+    if (typeof Budget !== 'undefined' && Budget.state && document.activeElement !== pb) Budget.fillBankSelect(pb, App.state.bank);
     const c = Calc.peaCountdown(App.state.openingDate);
     const rem = c.remaining;
     const parts = [];

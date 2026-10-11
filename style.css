@@ -500,3 +500,4 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1
 .bank-head { display: flex; justify-content: space-between; gap: 8px; padding: 10px 0 4px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--ink-2); }
 .bank-head b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .account-name { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0; font: inherit; color: inherit; overflow-wrap: anywhere; cursor: pointer; }
+.account-auto { font-variant-numeric: tabular-nums; padding-right: 42px; }

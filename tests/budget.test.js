@@ -368,8 +368,8 @@ test('comptes groupés par banque, avec total ; sans banque à la fin', () => {
   ]);
   assert.deepEqual(g.map((x) => [x.bank, x.total, x.accounts.length]), [['BforBank', 200.1, 1], ['Crédit Agricole', 3850.2, 2], ['', 50, 1]]);
   assert.deepEqual(B.groupAccounts([]), []);
-  const av = B.availability([{ name: 'Livret A', bank: 'Crédit Agricole', balance: 10 }], null, '2026-10-11');
-  assert.equal(av.items[0].name, 'Livret A (Crédit Agricole)');
+  const av = B.availability([{ name: 'Livret A', bank: 'Crédit Agricole', balance: 10 }], { amount: 5, until: '2031-01-01', bank: 'BforBank' }, '2026-10-11');
+  assert.deepEqual(av.items.map((i) => i.name), ['Livret A (Crédit Agricole)', 'PEA (BforBank)']);
 });
 
 test('menu des banques : liste française et allemande, « Mes banques » pour les autres', () => {
