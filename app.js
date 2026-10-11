@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.2.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.2.2'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -1241,9 +1241,12 @@ const App = {
         setTimeout(() => location.reload(), 8000); // filet de sécurité
         return;
       }
+      // Synchro chiffrée d'abord : on récupère les modifs faites sur les autres appareils
+      const synced = typeof Sync !== 'undefined' && Sync.ready();
+      if (synced) await Sync.syncNow({ silent: true });
       await App.refreshQuotes({ silent: true });
       const { ok, total } = await App.refreshAllLive({ silent: true, force: true });
-      App.toast(`Appli à jour (v${APP_VERSION})` + (total ? (ok === total ? ' · cours actualisés' : ` · ${ok}/${total} cours actualisé(s)`) : ''));
+      App.toast(`Appli à jour (v${APP_VERSION})` + (synced ? ' · synchronisée' : '') + (total ? (ok === total ? ' · cours actualisés' : ` · ${ok}/${total} cours actualisé(s)`) : ''));
     } catch (e) {
       console.warn('Actualisation impossible', e);
       App.toast('Actualisation impossible (hors ligne ?)');
