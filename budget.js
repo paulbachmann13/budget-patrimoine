@@ -993,6 +993,16 @@ const Budget = {
 
   persist() { BudgetStore.save(Budget.state); },
 
+  /**
+   * Redessine Patrimoine un instant plus tard. Après la modification d'un champ, un redessin immédiat
+   * remplace les boutons sous le doigt : si on appuie sur « × » juste après, l'appui est perdu.
+   * (La sauvegarde, elle, est immédiate.)
+   */
+  renderSoon() {
+    clearTimeout(Budget._soon);
+    Budget._soon = setTimeout(() => Budget.renderPatrimoine(), 350);
+  },
+
   /* ---------- Liaisons ---------- */
   bind() {
     Budget.$('btn-month-prev').addEventListener('click', () => Budget.shiftMonth(-1));
@@ -1754,7 +1764,7 @@ const Budget = {
       const v = BudgetCore.parseAmount(bal.value);
       if (Number.isNaN(v)) { bal.value = Fmt.input(a.balance); return; }
       if (v === a.balance) return; // déjà enregistré (évite un second rendu quand le champ perd le focus)
-      a.balance = v; a.date = Dates.today(); Budget.persist(); Budget.renderPatrimoine();
+      a.balance = v; a.date = Dates.today(); Budget.persist(); Budget.renderSoon();
     });
     const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
     del.addEventListener('click', () => {
@@ -1879,7 +1889,7 @@ const Budget = {
         const v = BudgetCore.parseAmount(val.value);
         if (Number.isNaN(v) || v < 0) { val.value = Fmt.input(now); return; }
         if (v === BudgetCore.assetValue(a, Dates.today())) return; // déjà enregistré (évite un second rendu quand le champ perd le focus)
-        a.value = v; a.date = Dates.today(); Budget.persist(); Budget.renderPatrimoine();
+        a.value = v; a.date = Dates.today(); Budget.persist(); Budget.renderSoon();
       });
       const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
       del.addEventListener('click', () => {
@@ -1905,7 +1915,7 @@ const Budget = {
         if (Number.isNaN(v) || v < 0 || v > 90) { pct.value = rate ? Fmt.input(rate) : ''; return; }
         if (v === (Number(a.depreciation) || 0)) return; // déjà enregistré
         a.value = BudgetCore.assetValue(a, Dates.today()); a.date = Dates.today(); a.depreciation = v; // repart de la valeur estimée d'aujourd'hui
-        Budget.persist(); Budget.renderPatrimoine();
+        Budget.persist(); Budget.renderSoon();
       });
       meta.append(hint, lbl, pct, unit);
       box.appendChild(meta);
