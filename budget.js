@@ -426,6 +426,18 @@ const BudgetCore = (() => {
     };
   }
 
+  /* ---------- PEA dans le patrimoine ---------- */
+
+  /**
+   * Valeur du PEA = actions + liquidités non investies (versements − achats).
+   * dep : résultat de Calc.deposits. Liquidités négatives (versement oublié) : ignorées, jamais retranchées.
+   */
+  function peaTotal(value, dep) {
+    const v = Number(value) || 0;
+    const cash = dep && dep.hasDeposits && dep.cash > 0 ? Math.round(dep.cash * 100) / 100 : 0;
+    return { value: v, cash, total: Math.round((v + cash) * 100) / 100 };
+  }
+
   /* ---------- Historique du patrimoine ---------- */
 
   /** Enregistre (ou met à jour) le total du mois. Retourne { history, changed }. */
@@ -505,7 +517,7 @@ const BudgetCore = (() => {
     normLabel, ruleKey, parseDate, parseAmount,
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
-    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, upsertSnapshot, reminders,
+    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, upsertSnapshot, reminders,
   };
 })();
 
@@ -1169,29 +1181,32 @@ const Budget = {
   renderPatrimoine() {
     if (typeof App === 'undefined' || !App.state || !Budget.state) return;
     const pf = Calc.portfolio(App.state.purchases, App.state.prices);
+    const dep = Calc.deposits(App.state.deposits, App.state.purchases);
+    const pea = BudgetCore.peaTotal(pf.value, dep);
     const accounts = Budget.state.accounts;
     const cash = accounts.reduce((s, a) => s + a.balance, 0);
-    const total = cash + pf.value;
+    const total = cash + pea.total;
     Budget.$('p-total').textContent = Fmt.eur(total);
 
     // Historique : total du mois enregistré (une seule ligne par mois, mise à jour si elle change)
-    if (accounts.length || pf.value) {
-      const { history, changed } = BudgetCore.upsertSnapshot(Budget.state.history, BudgetCore.monthOf(Dates.today()), { cash, pea: pf.value });
+    if (accounts.length || pea.total) {
+      const { history, changed } = BudgetCore.upsertSnapshot(Budget.state.history, BudgetCore.monthOf(Dates.today()), { cash, pea: pea.total });
       if (changed) { Budget.state.history = history; Budget.persist(); }
     }
     Budget.renderHistory();
     Budget.renderReminders();
     Budget.$('p-cash').textContent = Fmt.eur(cash);
-    Budget.$('p-pea').textContent = Fmt.eur(pf.value);
+    Budget.$('p-pea').textContent = Fmt.eur(pea.total);
     const pvEl = Budget.$('p-pea-pv');
     pvEl.textContent = pf.invested ? `${Fmt.signedEur(pf.pvGross)} (${Fmt.signedPct(pf.pvGrossPct)})` : '—';
+    Budget.$('p-pea-cash').textContent = pea.cash ? `dont ${Fmt.eur(pea.cash)} non investis` : '';
     pvEl.className = 'hint ' + (pf.invested ? Fmt.trend(pf.pvGross) : '');
 
     // Répartition : barre empilée comptes / PEA
     const bar = Budget.$('p-split');
     bar.replaceChildren();
     if (total > 0) {
-      const parts = [['Comptes', cash, 'var(--series-invested)'], ['PEA', pf.value, 'var(--series-gains)']].filter((p) => p[1] > 0);
+      const parts = [['Comptes', cash, 'var(--series-invested)'], ['PEA', pea.total, 'var(--series-gains)']].filter((p) => p[1] > 0);
       parts.forEach(([name, v, color]) => {
         const seg = document.createElement('span');
         seg.style.width = `${(v / total) * 100}%`; seg.style.background = color;

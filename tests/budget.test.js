@@ -333,6 +333,14 @@ test('évolution d\'une catégorie : 12 mois, total, comparaison si historique s
   assert.equal(inc.total, 500, 'revenu : montant reçu positif');
 });
 
+test('PEA dans le patrimoine : actions + liquidités non investies', () => {
+  // 800 € versés, 600 € d'actions achetées → 200 € de liquidités sur le PEA
+  assert.deepEqual(B.peaTotal(612.5, { hasDeposits: true, cash: 200 }), { value: 612.5, cash: 200, total: 812.5 });
+  assert.equal(B.peaTotal(600, { hasDeposits: false, cash: null }).total, 600, 'versements non saisis : actions seules');
+  assert.equal(B.peaTotal(600, { hasDeposits: true, cash: -50 }).total, 600, 'versement oublié : rien retranché');
+  assert.equal(B.peaTotal(0, { hasDeposits: true, cash: 800 }).total, 800, 'versé mais rien acheté');
+});
+
 test('historique du patrimoine : un point par mois, à l\'euro près', () => {
   let r = B.upsertSnapshot([], '2026-10', { cash: 853.1, pea: 812.4 });
   assert.equal(r.changed, true);
