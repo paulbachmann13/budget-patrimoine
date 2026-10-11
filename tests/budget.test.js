@@ -341,6 +341,32 @@ test('PEA dans le patrimoine : actions + liquidités non investies', () => {
   assert.equal(B.peaTotal(0, { hasDeposits: true, cash: 800 }).total, 800, 'versé mais rien acheté');
 });
 
+test('disponibilité : comptes bloqués, date de déblocage, PEA avant / après 5 ans', () => {
+  const accounts = [
+    { name: 'Livret A', balance: 3000 },
+    { name: 'Compte courant', balance: 850 },
+    { name: 'PEL', balance: 5000, blocked: true, until: '' },
+    { name: 'Dépôt à terme', balance: 1000, blocked: true, until: '2026-09-01' }, // date passée : disponible
+    { name: 'CEL', balance: 5000, blocked: true, until: '2028-01-01' },
+  ];
+  const av = B.availability(accounts, { amount: 870, until: '2031-06-03' }, '2026-10-11');
+  assert.equal(av.available, 4850);
+  assert.equal(av.blocked, 10870);
+  assert.deepEqual(av.items.filter((i) => i.blocked).map((i) => i.name), ['CEL', 'PEA', 'PEL'], 'dates les plus proches d\'abord, sans date en dernier');
+  assert.deepEqual(av.nextRelease, { name: 'CEL', date: '2028-01-01', amount: 5000 });
+  const after = B.availability([], { amount: 870, until: '2031-06-03' }, '2031-06-03');
+  assert.equal(after.available, 870, 'PEA de plus de 5 ans : disponible');
+  assert.equal(B.availability([], { amount: 0, until: '2031-06-03' }, '2026-10-11').items.length, 0);
+});
+
+test('stockage : comptes bloqués conservés', () => {
+  const { state } = BudgetStore.clean({ transactions: [], accounts: [
+    { name: 'PEL', balance: 5000, blocked: true, until: '2028-01-01' },
+    { name: 'Livret', balance: 10, until: '2028-01-01' },
+  ] });
+  assert.deepEqual(state.accounts.map((a) => [a.name, a.blocked, a.until]), [['PEL', true, '2028-01-01'], ['Livret', false, '']]);
+});
+
 test('historique du patrimoine : un point par mois, à l\'euro près', () => {
   let r = B.upsertSnapshot([], '2026-10', { cash: 853.1, pea: 812.4 });
   assert.equal(r.changed, true);

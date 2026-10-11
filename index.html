@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.4.0">
+  <link rel="stylesheet" href="style.css?v=2.5.0">
 </head>
 <body>
   <header class="topbar">
@@ -47,6 +47,15 @@
         <div class="kpi card"><p class="label">PEA</p><p class="kpi-value" id="p-pea">0,00 €</p><p class="hint" id="p-pea-pv"></p><p class="hint" id="p-pea-cash"></p></div>
       </div>
 
+      <h2>Disponibilité</h2>
+      <div class="card">
+        <div class="avail-row"><span>Disponible maintenant</span><b class="pos" id="p-available">0,00 €</b></div>
+        <div class="avail-row"><span>Bloqué</span><b id="p-blocked">0,00 €</b></div>
+        <div class="split-bar" id="p-avail-bar" aria-hidden="true"></div>
+        <div id="p-avail-list" class="stack avail-list"></div>
+        <p class="hint" id="p-avail-hint"></p>
+      </div>
+
       <h2>Évolution du patrimoine</h2>
       <div class="card chart-card">
         <div id="p-history" class="chart chart-small" role="img" aria-label="Patrimoine total mois par mois"></div>
@@ -58,7 +67,7 @@
 
       <h2>Mes comptes</h2>
       <div class="card">
-        <p class="hint" style="margin-top:0">Soldes saisis à la main (compte courant, livret…). Le PEA (actions + liquidités non investies) est repris automatiquement.</p>
+        <p class="hint" style="margin-top:0">Soldes saisis à la main (compte courant, livret…). « Bloqué » : argent que vous ne pouvez pas utiliser tout de suite (PEL, CEL…), avec une date de déblocage si elle existe. Le PEA (actions + liquidités) est repris automatiquement, bloqué jusqu'à ses 5 ans.</p>
         <div id="p-accounts" class="stack"></div>
         <p class="empty" id="p-accounts-empty">Aucun compte pour l'instant.</p>
         <form id="account-form" class="form" autocomplete="off">
@@ -70,6 +79,12 @@
               <input name="balance" type="text" inputmode="decimal" placeholder="1 250,50">
             </label>
           </div>
+          <label>Disponibilité
+            <select name="availability">
+              <option value="dispo">Disponible tout de suite</option>
+              <option value="bloque">Bloqué (PEL, CEL…)</option>
+            </select>
+          </label>
           <p class="error" id="account-error" hidden></p>
           <button type="submit" class="btn">+ Ajouter un compte</button>
         </form>
@@ -597,8 +612,8 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.4.0"></script>
-  <script src="app.js?v=2.4.0"></script>
-  <script src="sync.js?v=2.4.0"></script>
+  <script src="budget.js?v=2.5.0"></script>
+  <script src="app.js?v=2.5.0"></script>
+  <script src="sync.js?v=2.5.0"></script>
 </body>
 </html>

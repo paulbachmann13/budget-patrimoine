@@ -438,6 +438,34 @@ const BudgetCore = (() => {
     return { value: v, cash, total: Math.round((v + cash) * 100) / 100 };
   }
 
+  /* ---------- Argent disponible / bloqué ---------- */
+
+  /**
+   * Sépare l'argent utilisable tout de suite de l'argent bloqué.
+   * accounts : [{name, balance, blocked, until}] — un compte bloqué dont la date de
+   *            déblocage est passée compte comme disponible.
+   * pea      : { amount, until } — bloqué jusqu'aux 5 ans du PEA (until = 'AAAA-MM-JJ').
+   */
+  function availability(accounts, pea, today) {
+    const items = (accounts || []).map((a) => {
+      const blocked = !!a.blocked && !(a.until && a.until <= today);
+      return { name: a.name, amount: a.balance, blocked, until: blocked ? a.until || '' : '' };
+    });
+    if (pea && pea.amount) {
+      const blocked = !!pea.until && pea.until > today;
+      items.push({ name: 'PEA', amount: pea.amount, blocked, until: blocked ? pea.until : '', pea: true });
+    }
+    const round = (v) => Math.round(v * 100) / 100;
+    const available = round(items.filter((i) => !i.blocked).reduce((s, i) => s + i.amount, 0));
+    const blocked = round(items.filter((i) => i.blocked).reduce((s, i) => s + i.amount, 0));
+    const dated = items.filter((i) => i.blocked && i.until).sort((a, b) => a.until.localeCompare(b.until));
+    return {
+      available, blocked,
+      items: items.sort((a, b) => a.blocked - b.blocked || (a.until || '9').localeCompare(b.until || '9') || b.amount - a.amount),
+      nextRelease: dated.length ? { name: dated[0].name, date: dated[0].until, amount: dated[0].amount } : null,
+    };
+  }
+
   /* ---------- Historique du patrimoine ---------- */
 
   /** Enregistre (ou met à jour) le total du mois. Retourne { history, changed }. */
@@ -517,7 +545,7 @@ const BudgetCore = (() => {
     normLabel, ruleKey, parseDate, parseAmount,
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
-    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, upsertSnapshot, reminders,
+    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, upsertSnapshot, reminders,
   };
 })();
 
@@ -589,7 +617,10 @@ const BudgetStore = {
       const balance = Number(a && a.balance);
       const name = text(a && a.name, 60).trim();
       if (!name || !Number.isFinite(balance)) { dropped++; continue; }
-      accounts.push({ id: uid(a.id), name, balance, date: BudgetCore.parseDate(a.date) || '' });
+      accounts.push({
+        id: uid(a.id), name, balance, date: BudgetCore.parseDate(a.date) || '',
+        blocked: !!a.blocked, until: a.blocked ? BudgetCore.parseDate(a.until) || '' : '', // argent bloqué (PEL, CEL…)
+      });
     }
     const budgets = {};
     for (const [name, b] of Object.entries(data.budgets && typeof data.budgets === 'object' ? data.budgets : {})) {
@@ -1215,6 +1246,8 @@ const Budget = {
       });
     }
 
+    Budget.renderAvailability(pea.total);
+
     // Épargne du mois courant du budget
     const months = BudgetCore.monthsOf(Budget.state.transactions);
     const last = months.length ? months[months.length - 1] : null;
@@ -1242,7 +1275,20 @@ const Budget = {
       });
       row.append(name, bal, del);
       box.appendChild(row);
-      if (a.date) { const d = document.createElement('p'); d.className = 'hint account-date'; d.textContent = `mis à jour le ${Fmt.date(a.date)}`; box.appendChild(d); }
+      // Disponible tout de suite, ou bloqué (avec date de déblocage facultative)
+      const meta = document.createElement('div'); meta.className = 'account-meta';
+      const d = document.createElement('span'); d.className = 'hint'; d.textContent = a.date ? `mis à jour le ${Fmt.date(a.date)}` : '';
+      const sel = document.createElement('select'); sel.setAttribute('aria-label', `Disponibilité de ${a.name}`);
+      [['dispo', 'Disponible'], ['bloque', 'Bloqué']].forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
+      sel.value = a.blocked ? 'bloque' : 'dispo';
+      const until = document.createElement('input'); until.type = 'date'; until.value = a.until || '';
+      until.setAttribute('aria-label', `${a.name} : bloqué jusqu'au (facultatif)`); until.title = 'Bloqué jusqu\'au (facultatif)';
+      until.hidden = !a.blocked;
+      const untilLbl = document.createElement('span'); untilLbl.className = 'until-label'; untilLbl.textContent = 'jusqu\'au'; untilLbl.hidden = !a.blocked;
+      sel.addEventListener('change', () => { a.blocked = sel.value === 'bloque'; if (!a.blocked) a.until = ''; Budget.persist(); Budget.renderPatrimoine(); });
+      until.addEventListener('change', () => { a.until = BudgetCore.parseDate(until.value) || ''; Budget.persist(); Budget.renderPatrimoine(); });
+      meta.append(d, sel, untilLbl, until);
+      box.appendChild(meta);
     });
     Budget.$('p-accounts-empty').hidden = accounts.length > 0;
 
@@ -1250,6 +1296,42 @@ const Budget = {
     let canImport = false;
     try { canImport = !App.state.purchases.length && !!localStorage.getItem('suivi-pea:v1'); } catch (e) { /* stockage inaccessible */ }
     Budget.$('p-import-old').hidden = !canImport;
+  },
+
+  /** Argent disponible tout de suite / bloqué (PEA avant 5 ans, PEL, CEL…). */
+  renderAvailability(peaAmount) {
+    const until = App.state.openingDate ? Calc.peaCountdown(App.state.openingDate).targetISO : '';
+    const av = BudgetCore.availability(Budget.state.accounts, { amount: peaAmount, until }, Dates.today());
+    Budget.$('p-available').textContent = Fmt.eur(av.available);
+    Budget.$('p-blocked').textContent = Fmt.eur(av.blocked);
+    const bar = Budget.$('p-avail-bar');
+    bar.replaceChildren();
+    const tot = av.available + av.blocked;
+    if (tot > 0) {
+      [[av.available, 'var(--good)', 'Disponible'], [av.blocked, 'var(--muted)', 'Bloqué']].filter((x) => x[0] > 0).forEach(([v, color, name]) => {
+        const seg = document.createElement('span');
+        seg.style.width = `${(v / tot) * 100}%`; seg.style.background = color; seg.title = `${name} : ${Fmt.eur(v)}`;
+        bar.appendChild(seg);
+      });
+    }
+    const list = Budget.$('p-avail-list');
+    list.replaceChildren();
+    for (const group of [false, true]) {
+      const items = av.items.filter((i) => i.blocked === group && i.amount);
+      if (!items.length) continue;
+      const h = document.createElement('p'); h.className = 'label'; h.textContent = group ? 'Bloqué' : 'Disponible maintenant';
+      list.appendChild(h);
+      items.forEach((i) => {
+        const row = document.createElement('div'); row.className = 'tx-top';
+        const n = document.createElement('span');
+        n.textContent = i.blocked ? `${i.name} · ${i.until ? `jusqu'au ${Fmt.date(i.until)}` : 'sans date'}` : i.name;
+        const b = document.createElement('b'); b.textContent = Fmt.eur(i.amount);
+        row.append(n, b); list.appendChild(row);
+      });
+    }
+    Budget.$('p-avail-hint').textContent = av.nextRelease
+      ? `Prochain déblocage : ${av.nextRelease.name} le ${Fmt.date(av.nextRelease.date)} (${Fmt.eur(av.nextRelease.amount)} aujourd'hui).`
+      : (tot ? 'Marquez un compte « Bloqué » (PEL, CEL…) dans Mes comptes pour le sortir du disponible.' : '');
   },
 
   /** Courbe du patrimoine total, un point par mois. */
@@ -1299,7 +1381,8 @@ const Budget = {
     const err = Budget.$('account-error');
     if (!name || Number.isNaN(balance)) { err.textContent = 'Nom et solde valide (ex. 1 250,50) requis.'; err.hidden = false; return; }
     err.hidden = true;
-    Budget.state.accounts.push({ id: BudgetStore.newId(), name: name.slice(0, 60), balance, date: Dates.today() });
+    const blocked = form.availability.value === 'bloque';
+    Budget.state.accounts.push({ id: BudgetStore.newId(), name: name.slice(0, 60), balance, date: Dates.today(), blocked, until: '' });
     form.reset();
     Budget.persist(); Budget.renderPatrimoine();
   },

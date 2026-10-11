@@ -485,3 +485,15 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1
 .report-ops .tx-top b { font-size: 14px; }
 #report-dialog .position-grid { margin-top: 12px; }
 #btn-sell-all { margin-top: 6px; }
+
+/* ---------- Disponibilité (v2.5) ---------- */
+.avail-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 4px 0; }
+.avail-row b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.avail-list { margin-top: 12px; }
+.avail-list .label { margin-top: 12px; }
+.avail-list .tx-top span { font-size: 14px; }
+.account-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px !important; }
+.account-meta .hint { flex: 1 1 auto; margin: 0; white-space: nowrap; }
+.account-meta select, .account-meta input[type="date"] { width: auto; min-height: 36px; margin-top: 0; font-size: 15px; padding: 0 8px; }
+.account-meta input[type="date"] { max-width: 150px; }
+.until-label { font-size: 14px; color: var(--ink-2); }
