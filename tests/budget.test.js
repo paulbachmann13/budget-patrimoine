@@ -372,6 +372,19 @@ test('comptes groupés par banque, avec total ; sans banque à la fin', () => {
   assert.equal(av.items[0].name, 'Livret A (Crédit Agricole)');
 });
 
+test('menu des banques : liste française et allemande, « Mes banques » pour les autres', () => {
+  const all = Object.values(B.BANKS).flat();
+  assert.equal(new Set(all.map((b) => b.toLowerCase())).size, all.length, 'pas de doublon');
+  for (const b of ['Crédit Agricole', 'BforBank', 'BoursoBank', 'La Banque Postale', 'Trade Republic', 'Sparkasse']) assert.ok(all.includes(b), b);
+  const g = B.bankOptions(['Crédit Agricole', 'Ma Petite Banque', '', 'ma petite banque ']);
+  assert.equal(g[0].label, 'Mes banques');
+  assert.deepEqual(g[0].banks, ['Ma Petite Banque'], 'banque connue ou en double : pas répétée');
+  assert.ok(g.some((x) => x.label === 'Allemagne'));
+  const fr = g.find((x) => x.label === 'France · banques').banks;
+  assert.deepEqual(fr, [...fr].sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' })), 'ordre alphabétique');
+  assert.equal(B.bankOptions([])[0].label, 'France · banques');
+});
+
 test('stockage : comptes bloqués conservés', () => {
   const { state } = BudgetStore.clean({ transactions: [], accounts: [
     { name: 'PEL', balance: 5000, blocked: true, until: '2028-01-01' },

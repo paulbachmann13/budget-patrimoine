@@ -466,6 +466,53 @@ const BudgetCore = (() => {
     };
   }
 
+  /** Banques proposées dans le menu des comptes (données publiques). « Autre… » permet d'en saisir une. */
+  const BANKS = {
+    'France · banques': [
+      'Banque Populaire', 'BNP Paribas', 'BRED', 'Caisse d\'Épargne', 'CCF', 'CIC', 'Crédit Agricole', 'Crédit Coopératif',
+      'Crédit Maritime', 'Crédit Mutuel', 'Crédit Mutuel Arkéa', 'Crédit Mutuel de Bretagne', 'Banque Française Mutualiste',
+      'Banque Palatine', 'Banque Transatlantique', 'La Banque Postale', 'LCL', 'Milleis Banque', 'Société Générale',
+      'Banque Courtois', 'Banque Kolb', 'Banque Laydernier', 'Banque Nuger', 'Banque Rhône-Alpes', 'Banque Tarneaud',
+      'Banque de Savoie', 'Banque Chaabi', 'Neuflize OBC', 'Rothschild & Co', 'Edmond de Rothschild', 'Banque Hottinguer',
+    ],
+    'France · banques en ligne et néobanques': [
+      'BforBank', 'BoursoBank', 'Fortuneo', 'Hello bank!', 'Monabanq', 'Ma French Bank', 'Orange Bank', 'Sumeria (Lydia)',
+      'Nickel', 'Green-Got', 'Helios', 'OnlyOne', 'Kard', 'Pixpay', 'Xaalys', 'Qonto', 'Shine',
+      'Revolut', 'N26', 'bunq', 'Wise', 'Vivid Money',
+    ],
+    'Courtiers, assurance-vie et crypto': [
+      'Trade Republic', 'Scalable Capital', 'Saxo Banque', 'Bourse Direct', 'DEGIRO', 'Interactive Brokers', 'XTB',
+      'Linxea', 'Lucya Cardif', 'Yomoni', 'Nalo', 'Ramify', 'Goodvest', 'Distingo Bank',
+      'Binance', 'Coinbase', 'Bitpanda', 'Bitstack', 'Deblock', 'Kraken',
+    ],
+    'Épargne salariale et crédit': [
+      'Amundi Épargne Salariale', 'Natixis Interépargne', 'Esalia', 'BNP Paribas Épargne Salariale', 'Epsens',
+      'Cetelem', 'Cofidis', 'Franfinance', 'Oney', 'Carrefour Banque', 'Floa', 'My Money Bank', 'Younited',
+    ],
+    'Allemagne': [
+      'Commerzbank', 'comdirect', 'Consorsbank', 'DKB', 'Deutsche Bank', 'HypoVereinsbank', 'ING Deutschland',
+      'Postbank', 'Santander Deutschland', 'Sparkasse', 'Targobank', 'Volksbank / Raiffeisenbank', 'C24', 'Tomorrow',
+    ],
+  };
+
+  /**
+   * Groupes du menu des banques : « Mes banques » (déjà utilisées mais absentes de la liste) d'abord,
+   * puis la liste, chaque groupe trié par ordre alphabétique.
+   */
+  function bankOptions(used = []) {
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const known = new Set(Object.values(BANKS).flat().map(norm));
+    const mine = [];
+    for (const s of (used || []).map((x) => String(x || '').trim())) {
+      if (s && !known.has(norm(s))) { known.add(norm(s)); mine.push(s); } // sans doublon, majuscules ignorées
+    }
+    const sort = (list) => [...list].sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
+    return [
+      ...(mine.length ? [{ label: 'Mes banques', banks: sort(mine) }] : []),
+      ...Object.entries(BANKS).map(([label, banks]) => ({ label, banks: sort(banks) })),
+    ];
+  }
+
   /** Comptes regroupés par banque (ordre alphabétique, « sans banque » à la fin), avec le total de chaque banque. */
   function groupAccounts(accounts) {
     const groups = new Map();
@@ -559,7 +606,7 @@ const BudgetCore = (() => {
     normLabel, ruleKey, parseDate, parseAmount,
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
-    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, groupAccounts, upsertSnapshot, reminders,
+    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, BANKS, bankOptions, groupAccounts, upsertSnapshot, reminders,
   };
 })();
 
@@ -1292,13 +1339,51 @@ const Budget = {
     Budget.$('p-import-old').hidden = !canImport;
   },
 
-  /** Suggestions de banques : les grandes banques + celles déjà utilisées. */
+  /** Menu des banques du formulaire d'ajout (garde le choix en cours). */
   renderBankList() {
-    const list = Budget.$('banks');
-    if (!list) return;
-    const base = ['Crédit Agricole', 'BforBank', 'BoursoBank', 'Banque Populaire', 'BNP Paribas', 'Caisse d\'Épargne', 'Crédit Mutuel', 'LCL', 'La Banque Postale', 'Société Générale', 'Fortuneo', 'Hello bank!', 'Revolut', 'Trade Republic', 'Lydia'];
-    const names = [...new Set([...Budget.state.accounts.map((a) => a.bank).filter(Boolean), ...base])];
-    list.replaceChildren(...names.map((n) => { const o = document.createElement('option'); o.value = n; return o; }));
+    const sel = Budget.$('account-form') && Budget.$('account-form').bank;
+    if (sel && document.activeElement !== sel) Budget.fillBankSelect(sel, sel.value);
+  },
+
+  /**
+   * Remplit un menu de banques : « Sans banque », les groupes (Mes banques, France, Allemagne…)
+   * et « Autre… », qui demande le nom et l'ajoute au menu.
+   */
+  fillBankSelect(sel, current = '') {
+    const opt = (value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; return o; };
+    const used = [...Budget.state.accounts.map((a) => a.bank), current];
+    const groups = BudgetCore.bankOptions(used).map((g) => {
+      const og = document.createElement('optgroup'); og.label = g.label;
+      g.banks.forEach((b) => og.appendChild(opt(b, b)));
+      return og;
+    });
+    sel.replaceChildren(opt('', 'Sans banque'), ...groups, opt('__other', 'Autre (saisir le nom)…'));
+    sel.value = current || '';
+    if (!sel.dataset.bound) {
+      sel.dataset.bound = '1';
+      sel.addEventListener('change', () => {
+        if (sel.value !== '__other') { sel.dataset.last = sel.value; return; }
+        const name = (prompt('Nom de la banque :') || '').trim().slice(0, 40);
+        Budget.fillBankSelect(sel, name || sel.dataset.last || '');
+      });
+    }
+    sel.dataset.last = sel.value;
+  },
+
+  /** Fenêtre « Changer la banque » d'un compte existant. */
+  pickBank(a) {
+    const dlg = Budget.$('bank-dialog');
+    const sel = Budget.$('bank-dialog-select');
+    Budget.$('bank-dialog-title').textContent = `Banque de « ${a.name} »`;
+    Budget.fillBankSelect(sel, a.bank || '');
+    const ok = Budget.$('bank-dialog-ok');
+    const onOk = () => {
+      if (sel.value !== '__other') { a.bank = sel.value; Budget.persist(); Budget.renderPatrimoine(); }
+      dlg.close();
+    };
+    ok.onclick = onOk;
+    Budget.$('bank-dialog-cancel').onclick = () => dlg.close();
+    dlg.showModal();
   },
 
   /** Un compte : nom (touche = changer de banque), solde modifiable, disponibilité. */
@@ -1309,11 +1394,7 @@ const Budget = {
     name.textContent = a.name;
     name.title = 'Changer la banque';
     name.setAttribute('aria-label', `${a.name} : changer la banque`);
-    name.addEventListener('click', () => {
-      const v = prompt(`Banque de « ${a.name} » (vide = sans banque) :`, a.bank || '');
-      if (v === null) return;
-      a.bank = v.trim().slice(0, 40); Budget.persist(); Budget.renderPatrimoine();
-    });
+    name.addEventListener('click', () => Budget.pickBank(a));
     const bal = document.createElement('input');
     bal.type = 'text'; bal.inputMode = 'decimal'; bal.value = Fmt.input(a.balance); bal.setAttribute('aria-label', `Solde de ${a.name}`);
     bal.addEventListener('change', () => {
