@@ -135,6 +135,7 @@ const SyncCore = (() => {
   const BUDGET_SPECS = {
     transactions: byId, accounts: byId,
     history: (x) => x.month,
+    assets: byId,
     rules: (x) => `${String(x.match).toLowerCase()}|${x.sign || ''}`,
     categories: (x) => x.name,
   };

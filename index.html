@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.8.0">
+  <link rel="stylesheet" href="style.css?v=2.9.1">
 </head>
 <body>
   <header class="topbar">
@@ -40,6 +40,7 @@
         <p class="label">Patrimoine total</p>
         <p class="hero-value" id="p-total">0,00 €</p>
         <div class="split-bar" id="p-split" aria-hidden="true"></div>
+        <p class="hint" id="p-assets-line" hidden></p>
       </div>
 
       <div class="kpis">
@@ -90,6 +91,38 @@
           </label>
           <p class="error" id="account-error" hidden></p>
           <button type="submit" class="btn">+ Ajouter un compte</button>
+        </form>
+      </div>
+
+      <h2>Mes biens</h2>
+      <div class="card">
+        <p class="hint" style="margin-top:0">Voiture, logement : valeur estimée, à mettre à jour de temps en temps. Ils s'ajoutent au patrimoine total sans toucher à l'argent disponible. Le reste (meubles, matériel…) n'a pas sa place ici.</p>
+        <div id="p-assets" class="stack"></div>
+        <p class="hint" id="p-assets-cost" hidden></p>
+        <p class="empty" id="p-assets-empty">Aucun bien pour l'instant.</p>
+        <form id="asset-form" class="form" autocomplete="off">
+          <div class="row">
+            <label>Nom
+              <input name="name" type="text" placeholder="Ma voiture">
+            </label>
+            <label>Valeur (€)
+              <input name="value" type="text" inputmode="decimal" placeholder="8 000">
+            </label>
+          </div>
+          <div class="row">
+            <label>Type
+              <select name="kind">
+                <option value="vehicule">Véhicule</option>
+                <option value="immobilier">Immobilier</option>
+              </select>
+            </label>
+            <label>Dépréciation (% / an)
+              <input name="depreciation" type="text" inputmode="decimal" placeholder="10" value="10">
+            </label>
+          </div>
+          <p class="hint">Un véhicule perd en moyenne 10 % de sa valeur par an (plus vite les premières années). Laissez vide pour une valeur fixe. La valeur affichée baisse toute seule au fil du temps.</p>
+          <p class="error" id="asset-error" hidden></p>
+          <button type="submit" class="btn">+ Ajouter un bien</button>
         </form>
       </div>
 
@@ -704,9 +737,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.8.0"></script>
-  <script src="app.js?v=2.8.0"></script>
-  <script src="sync.js?v=2.8.0"></script>
-  <script src="lock.js?v=2.8.0"></script>
+  <script src="budget.js?v=2.9.1"></script>
+  <script src="app.js?v=2.9.1"></script>
+  <script src="sync.js?v=2.9.1"></script>
+  <script src="lock.js?v=2.9.1"></script>
 </body>
 </html>

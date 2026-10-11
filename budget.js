@@ -438,6 +438,36 @@ const BudgetCore = (() => {
     return { value: v, cash, total: Math.round((v + cash) * 100) / 100 };
   }
 
+  /**
+   * Biens : véhicules et immobilier seulement (le reste n'entre pas dans le patrimoine).
+   * Le patrimoine financier (comptes + PEA) reste séparé : il sert à la disponibilité et à la courbe.
+   * @returns {{financial, vehicles, realEstate, assets, total}} total = financier + biens
+   */
+  function netWorth(financial, assets, today) {
+    const r = (v) => Math.round(v * 100) / 100;
+    const sum = (kind) => r((assets || []).filter((a) => a.kind === kind).reduce((s, a) => s + assetValue(a, today), 0));
+    const vehicles = sum('vehicule'); const realEstate = sum('immobilier');
+    return { financial: r(financial), vehicles, realEstate, assets: r(vehicles + realEstate), total: r(financial + vehicles + realEstate) };
+  }
+
+  /**
+   * Valeur estimée d'un bien à une date : valeur saisie (à la date `date`) dépréciée de
+   * `depreciation` % par an, de façon composée. Sans date, sans taux ou sans `today` : valeur saisie.
+   */
+  function assetValue(asset, today) {
+    const value = Number(asset && asset.value) || 0;
+    const rate = Number(asset && asset.depreciation) || 0;
+    if (!today || !asset.date || !(rate > 0) || asset.date >= today) return Math.round(value * 100) / 100;
+    const years = daysBetween(asset.date, today) / 365.25;
+    return Math.round(value * Math.pow(1 - Math.min(rate, 100) / 100, years) * 100) / 100;
+  }
+
+  /** Perte de valeur estimée des biens sur les 12 prochains mois (et par mois). */
+  function assetsDepreciation(assets, today) {
+    const yearly = Math.round((assets || []).reduce((s, a) => s + assetValue(a, today) * ((Number(a.depreciation) || 0) / 100), 0) * 100) / 100;
+    return { yearly, monthly: Math.round((yearly / 12) * 100) / 100 };
+  }
+
   /* ---------- Argent disponible / bloqué ---------- */
 
   /**
@@ -741,6 +771,9 @@ const BudgetCore = (() => {
    */
   function reminders(state, today) {
     const out = [];
+    // Valeur d'un bien (voiture, logement) pas revue depuis plus d'un an
+    const stale = (state.assets || []).filter((a) => a.date && daysBetween(a.date, today) > 365).map((a) => a.name);
+    if (stale.length) out.push({ id: 'assets', text: `Valeur de ${stale.join(', ')} saisie il y a plus d'un an : mettez-la à jour (Patrimoine → Mes biens).` });
     const tx = state.transactions || [];
     if (!tx.length) return out;
     const lastTx = tx.reduce((max, t) => (t.date > max ? t.date : max), tx[0].date);
@@ -797,7 +830,7 @@ const BudgetCore = (() => {
     normLabel, ruleKey, parseDate, parseAmount,
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
-    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, BANKS, bankOptions, groupAccounts, upsertSnapshot, reminders,
+    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, netWorth, assetValue, assetsDepreciation, availability, BANKS, bankOptions, groupAccounts, upsertSnapshot, reminders,
     addDays, addMonths, endOfMonth, merchantKey, recurring, subscriptions, forecastMonth, monthRecap,
   };
 })();
@@ -816,6 +849,7 @@ const BudgetStore = {
       rules: [],          // règles de l'utilisateur [{match, category, sign?}]
       categories: BudgetCore.DEFAULT_CATEGORIES.map((c) => ({ ...c })),
       accounts: [],       // comptes de patrimoine saisis à la main [{id, name, balance, date}]
+      assets: [],         // biens [{id, name, kind: 'vehicule' | 'immobilier', value, date}]
       budgets: {},        // plafonds { catégorie: { limit, period: 'mois' | 'an' } }
       history: [],        // patrimoine mois par mois [{month, cash, pea, total}]
       lastExport: null,
@@ -876,6 +910,18 @@ const BudgetStore = {
         blocked: !!a.blocked, until: a.blocked ? BudgetCore.parseDate(a.until) || '' : '', // argent bloqué (PEL, CEL…)
       });
     }
+    const assets = [];
+    for (const a of Array.isArray(data.assets) ? data.assets : []) {
+      const value = Number(a && a.value);
+      const name = text(a && a.name, 60).trim();
+      if (!name || !Number.isFinite(value) || value < 0) { dropped++; continue; }
+      const rate = Number(a.depreciation);
+      assets.push({
+        id: uid(a.id), name, kind: a.kind === 'immobilier' ? 'immobilier' : 'vehicule',
+        value: Math.round(value * 100) / 100, date: BudgetCore.parseDate(a.date) || '',
+        depreciation: Number.isFinite(rate) && rate > 0 ? Math.min(90, Math.round(rate * 100) / 100) : 0, // % par an
+      });
+    }
     const budgets = {};
     for (const [name, b] of Object.entries(data.budgets && typeof data.budgets === 'object' ? data.budgets : {})) {
       const limit = Number(b && b.limit);
@@ -895,7 +941,7 @@ const BudgetStore = {
     history.sort((a, b) => a.month.localeCompare(b.month));
     return {
       state: {
-        version: 1, transactions, rules, categories, accounts, budgets, history,
+        version: 1, transactions, rules, categories, accounts, assets, budgets, history,
         lastExport: BudgetCore.parseDate(data.lastExport) || null,
         lastImport: BudgetCore.parseDate(data.lastImport) || null,
         lastEncryptedExport: BudgetCore.parseDate(data.lastEncryptedExport) || null,
@@ -968,6 +1014,10 @@ const Budget = {
       Budget.toast(`${n} transaction(s) recatégorisée(s)`);
     });
     Budget.$('account-form').addEventListener('submit', Budget.addAccount);
+    Budget.$('asset-form').addEventListener('submit', Budget.addAsset);
+    Budget.$('asset-form').kind.addEventListener('change', Budget.syncAssetForm);
+    Budget.$('asset-form').depreciation.addEventListener('input', (e) => { e.target.dataset.touched = '1'; });
+    Budget.syncAssetForm();
     Budget.$('btn-recap').addEventListener('click', () => Budget.openRecap(Budget.month));
     Budget.$('recap-close').addEventListener('click', () => Budget.$('recap-dialog').close());
   },
@@ -1565,6 +1615,7 @@ const Budget = {
     const cash = accounts.reduce((s, a) => s + a.balance, 0);
     const total = cash + pea.total;
     Budget.$('p-total').textContent = Fmt.eur(total);
+    Budget.renderAssets(total);
 
     // Historique : total du mois enregistré (une seule ligne par mois, mise à jour si elle change)
     if (accounts.length || pea.total) {
@@ -1702,6 +1753,7 @@ const Budget = {
     bal.addEventListener('change', () => {
       const v = BudgetCore.parseAmount(bal.value);
       if (Number.isNaN(v)) { bal.value = Fmt.input(a.balance); return; }
+      if (v === a.balance) return; // déjà enregistré (évite un second rendu quand le champ perd le focus)
       a.balance = v; a.date = Dates.today(); Budget.persist(); Budget.renderPatrimoine();
     });
     const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
@@ -1801,6 +1853,88 @@ const Budget = {
     };
     tick(0, 'start'); tick(h.length - 1, 'end');
     svgEl('line', { x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom, class: 'baseline' }, svg);
+  },
+
+  /** Biens (véhicules, immobilier) : liste modifiable, et total avec les biens sous le patrimoine. */
+  renderAssets(financial) {
+    const assets = Budget.state.assets;
+    const today = Dates.today();
+    const nw = BudgetCore.netWorth(financial, assets, today);
+    const line = Budget.$('p-assets-line');
+    line.hidden = !assets.length;
+    line.textContent = assets.length ? `Avec mes biens : ${Fmt.eur(nw.total)} (biens ${Fmt.eur(nw.assets)} + argent ${Fmt.eur(nw.financial)})` : '';
+    const dep = BudgetCore.assetsDepreciation(assets, today);
+    const cost = Budget.$('p-assets-cost');
+    cost.hidden = !(dep.yearly > 0);
+    cost.textContent = dep.yearly > 0 ? `Dépréciation estimée : −${Fmt.eur0(dep.yearly)} par an (≈ −${Fmt.eur0(dep.monthly)} par mois). Ce n'est pas de l'argent sorti de votre compte : c'est la valeur du bien qui baisse.` : '';
+    const box = Budget.$('p-assets');
+    box.replaceChildren();
+    assets.forEach((a) => {
+      const now = BudgetCore.assetValue(a, today);
+      const row = document.createElement('div'); row.className = 'account-row';
+      const name = document.createElement('span'); name.textContent = `${a.kind === 'immobilier' ? '🏠' : '🚗'} ${a.name}`;
+      const val = document.createElement('input');
+      val.type = 'text'; val.inputMode = 'decimal'; val.value = Fmt.input(now); val.setAttribute('aria-label', `Valeur estimée de ${a.name}`);
+      val.addEventListener('change', () => {
+        const v = BudgetCore.parseAmount(val.value);
+        if (Number.isNaN(v) || v < 0) { val.value = Fmt.input(now); return; }
+        if (v === BudgetCore.assetValue(a, Dates.today())) return; // déjà enregistré (évite un second rendu quand le champ perd le focus)
+        a.value = v; a.date = Dates.today(); Budget.persist(); Budget.renderPatrimoine();
+      });
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
+      del.addEventListener('click', () => {
+        if (!confirm(`Supprimer « ${a.name} » de vos biens ?`)) return;
+        Budget.state.assets = Budget.state.assets.filter((x) => x.id !== a.id);
+        Budget.persist(); Budget.renderPatrimoine();
+      });
+      row.append(name, val, del);
+      box.appendChild(row);
+      // Dépréciation par an : changer le taux repart de la valeur d'aujourd'hui (pas de saut)
+      const meta = document.createElement('div'); meta.className = 'account-meta';
+      const hint = document.createElement('span'); hint.className = 'hint';
+      const rate = Number(a.depreciation) || 0;
+      hint.textContent = (a.date ? `valeur du ${Fmt.date(a.date)} : ${Fmt.eur0(a.value)}` : '')
+        + (rate > 0 ? ` · −${Fmt.eur0(now * rate / 100)} / an` : '');
+      const lbl = document.createElement('span'); lbl.className = 'until-label'; lbl.textContent = 'Dépréciation';
+      const pct = document.createElement('input');
+      pct.type = 'text'; pct.inputMode = 'decimal'; pct.className = 'asset-rate'; pct.value = rate ? Fmt.input(rate) : '';
+      pct.placeholder = '0'; pct.setAttribute('aria-label', `Dépréciation annuelle de ${a.name} en pourcentage`);
+      const unit = document.createElement('span'); unit.className = 'until-label'; unit.textContent = '% / an';
+      pct.addEventListener('change', () => {
+        const v = pct.value.trim() === '' ? 0 : BudgetCore.parseAmount(pct.value);
+        if (Number.isNaN(v) || v < 0 || v > 90) { pct.value = rate ? Fmt.input(rate) : ''; return; }
+        if (v === (Number(a.depreciation) || 0)) return; // déjà enregistré
+        a.value = BudgetCore.assetValue(a, Dates.today()); a.date = Dates.today(); a.depreciation = v; // repart de la valeur estimée d'aujourd'hui
+        Budget.persist(); Budget.renderPatrimoine();
+      });
+      meta.append(hint, lbl, pct, unit);
+      box.appendChild(meta);
+    });
+    Budget.$('p-assets-empty').hidden = assets.length > 0;
+  },
+
+  /** Suggestion de dépréciation : 10 % par an pour un véhicule, aucune pour l'immobilier (modifiable). */
+  syncAssetForm() {
+    const f = Budget.$('asset-form');
+    const rate = f.depreciation;
+    if (rate.dataset.touched) return;
+    rate.value = f.kind.value === 'vehicule' ? '10' : '';
+  },
+
+  addAsset(ev) {
+    ev.preventDefault();
+    const form = Budget.$('asset-form');
+    const name = form.name.value.trim();
+    const value = BudgetCore.parseAmount(form.value.value);
+    const err = Budget.$('asset-error');
+    if (!name || Number.isNaN(value) || value < 0) { err.textContent = 'Nom et valeur valide (ex. 8 000) requis.'; err.hidden = false; return; }
+    const rate = form.depreciation.value.trim() === '' ? 0 : BudgetCore.parseAmount(form.depreciation.value);
+    if (Number.isNaN(rate) || rate < 0 || rate > 90) { err.textContent = 'Dépréciation : un pourcentage par an entre 0 et 90 (ex. 10).'; err.hidden = false; return; }
+    err.hidden = true;
+    Budget.state.assets.push({ id: BudgetStore.newId(), name: name.slice(0, 60), kind: form.kind.value === 'immobilier' ? 'immobilier' : 'vehicule', value, date: Dates.today(), depreciation: rate });
+    form.reset();
+    Budget.syncAssetForm();
+    Budget.persist(); Budget.renderPatrimoine();
   },
 
   addAccount(ev) {

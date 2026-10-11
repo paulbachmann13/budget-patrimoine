@@ -543,3 +543,4 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .lock-keys.disabled { opacity: .4; pointer-events: none; }
 .lock-box .link-btn { display: block; margin: 8px auto 0; }
 .lock-keys button.lock-bio { font-size: 14px; }
+.asset-rate { width: 64px !important; text-align: right; min-height: 36px; margin-top: 0 !important; font-size: 15px; padding: 0 8px; }

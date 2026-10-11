@@ -431,3 +431,61 @@ test('stockage : plafonds, historique, dates de rappel et type « aide » conser
   assert.equal(state.lastImport, '2026-10-10');
   assert.equal(state.lastEncryptedExport, null);
 });
+
+test('biens : voiture et immobilier comptés à part, patrimoine avec biens', () => {
+  const assets = [
+    { id: 'a', name: 'Voiture', kind: 'vehicule', value: 8000.5 },
+    { id: 'b', name: 'Appartement', kind: 'immobilier', value: 150000 },
+    { id: 'c', name: 'Moto', kind: 'vehicule', value: 2000 },
+  ];
+  assert.deepEqual(B.netWorth(15010.4, assets), { financial: 15010.4, vehicles: 10000.5, realEstate: 150000, assets: 160000.5, total: 175010.9 });
+  assert.deepEqual(B.netWorth(100, []), { financial: 100, vehicles: 0, realEstate: 0, assets: 0, total: 100 });
+  assert.equal(B.netWorth(100, undefined).total, 100);
+});
+
+test('biens : stockage (type, valeur, date) et rappel d\'une valeur trop ancienne', () => {
+  const { state, dropped } = BudgetStore.clean({ transactions: [], assets: [
+    { name: 'Voiture', kind: 'vehicule', value: '8000', date: '2026-01-10' },
+    { name: 'Maison', kind: 'immobilier', value: 200000 },
+    { name: 'Autre', kind: 'meuble', value: 50 },
+    { name: '', value: 10 }, { name: 'Négatif', value: -5 }, { name: 'Texte', value: 'abc' },
+  ] });
+  assert.deepEqual(state.assets.map((a) => [a.name, a.kind, a.value, a.date]), [
+    ['Voiture', 'vehicule', 8000, '2026-01-10'], ['Maison', 'immobilier', 200000, ''], ['Autre', 'vehicule', 50, ''],
+  ]);
+  assert.equal(dropped, 3);
+  assert.deepEqual(BudgetStore.clean({ transactions: [] }).state.assets, []);
+  const r = B.reminders({ transactions: [], assets: [{ name: 'Voiture', date: '2025-09-01' }, { name: 'Maison', date: '2026-08-01' }, { name: 'Sans date' }] }, '2026-10-11');
+  assert.deepEqual(r.map((x) => x.id), ['assets']);
+  assert.match(r[0].text, /Voiture/);
+  assert.ok(!/Maison|Sans date/.test(r[0].text));
+});
+
+test('dépréciation d\'un bien : valeur composée par an, sans saut, frais annuels', () => {
+  // Exemple : voiture à 16 000 € au 11/10/2026, −10 % par an
+  const car = { name: 'Voiture', kind: 'vehicule', value: 16000, date: '2026-10-11', depreciation: 10 };
+  assert.equal(B.assetValue(car, '2026-10-11'), 16000, 'le jour de la saisie : valeur saisie');
+  assert.equal(B.assetValue(car, '2026-09-01'), 16000, 'date antérieure : jamais augmentée');
+  assert.ok(Math.abs(B.assetValue(car, '2027-10-11') - 14400) < 6, 'un an plus tard ≈ −10 %');
+  assert.ok(Math.abs(B.assetValue(car, '2028-10-10') - 12960) < 12, 'deux ans : composé (−19 %)');
+  assert.equal(B.assetValue({ ...car, depreciation: 0 }, '2030-01-01'), 16000, 'sans taux : fixe');
+  assert.equal(B.assetValue({ ...car, date: '' }, '2030-01-01'), 16000, 'sans date : fixe');
+  assert.equal(B.assetValue(car), 16000, 'sans date du jour : fixe');
+  const house = { name: 'Maison', kind: 'immobilier', value: 200000, date: '2026-01-01', depreciation: 0 };
+  const d = B.assetsDepreciation([car, house], '2026-10-11');
+  assert.equal(d.yearly, 1600);
+  assert.equal(d.monthly, 133.33);
+  assert.deepEqual(B.assetsDepreciation([], '2026-10-11'), { yearly: 0, monthly: 0 });
+  // Le patrimoine utilise la valeur dépréciée
+  const nw = B.netWorth(1000, [car], '2027-10-11');
+  assert.ok(Math.abs(nw.vehicles - 14400) < 6 && Math.abs(nw.total - 15400) < 6);
+  assert.equal(B.netWorth(1000, [car]).vehicles, 16000);
+});
+
+test('stockage : taux de dépréciation conservé et borné', () => {
+  const { state } = BudgetStore.clean({ transactions: [], assets: [
+    { name: 'A', kind: 'vehicule', value: 100, depreciation: '12,5' }, { name: 'B', value: 100, depreciation: 150 },
+    { name: 'C', value: 100, depreciation: -3 }, { name: 'D', value: 100 }, { name: 'E', value: 100, depreciation: 'x' },
+  ] });
+  assert.deepEqual(state.assets.map((a) => a.depreciation), [0, 90, 0, 0, 0]);
+});
