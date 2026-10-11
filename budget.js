@@ -1769,6 +1769,7 @@ const Budget = {
     const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
     del.addEventListener('click', () => {
       if (!confirm(`Supprimer le compte « ${a.name} » ?`)) return;
+      if (typeof Sync !== 'undefined') Sync.noteDeleted('accounts', a.id);
       Budget.state.accounts = Budget.state.accounts.filter((x) => x.id !== a.id);
       Budget.persist(); Budget.renderPatrimoine();
     });
@@ -1894,6 +1895,7 @@ const Budget = {
       const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
       del.addEventListener('click', () => {
         if (!confirm(`Supprimer « ${a.name} » de vos biens ?`)) return;
+        if (typeof Sync !== 'undefined') Sync.noteDeleted('assets', a.id);
         Budget.state.assets = Budget.state.assets.filter((x) => x.id !== a.id);
         Budget.persist(); Budget.renderPatrimoine();
       });

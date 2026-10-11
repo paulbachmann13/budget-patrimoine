@@ -158,7 +158,36 @@ const SyncCore = (() => {
     };
   }
 
-  return { same, mergeList, mergeObject, merge };
+  /** Listes dont l'utilisateur peut supprimer des éléments, par partie ({budget, pea}). */
+  const DELETABLE = { budget: ['accounts', 'assets'], pea: ['purchases', 'deposits', 'sales', 'moves'] };
+
+  /**
+   * Retire des données les éléments supprimés par l'utilisateur sur CET appareil.
+   * deleted = { liste: { id: horodatage } }. Une suppression volontaire est définitive : ni une
+   * base de comparaison périmée ni une copie ancienne sur un autre appareil ne peut la ramener.
+   */
+  function dropDeleted(data, deleted) {
+    const out = { budget: { ...data.budget }, pea: { ...data.pea } };
+    let removed = 0;
+    for (const [store, lists] of Object.entries(DELETABLE)) {
+      for (const list of lists) {
+        const ids = deleted && deleted[list];
+        if (!ids || !Array.isArray(out[store][list])) continue;
+        const before = out[store][list].length;
+        out[store][list] = out[store][list].filter((x) => !(x && Object.prototype.hasOwnProperty.call(ids, x.id)));
+        removed += before - out[store][list].length;
+      }
+    }
+    return { data: out, removed };
+  }
+
+  /** Nombre d'éléments des listes suivies (pour le journal de synchronisation). */
+  function counts(data) {
+    const n = (store, list) => (data && data[store] && Array.isArray(data[store][list]) ? data[store][list].length : 0);
+    return { biens: n('budget', 'assets'), comptes: n('budget', 'accounts'), transactions: n('budget', 'transactions'), achats: n('pea', 'purchases'), ventes: n('pea', 'sales') };
+  }
+
+  return { same, mergeList, mergeObject, merge, dropDeleted, counts, DELETABLE };
 })();
 
 /* ==========================================================================
@@ -174,8 +203,14 @@ const Sync = {
   key: null,       // CryptoKey
   meta: null,
   busy: false,
+  busySince: 0,
   timer: null,
   pendingPush: false,
+  lastError: '',
+  TIMEOUT_MS: 20000,  // délai maximal d'une requête réseau
+  POLL_MS: 60000,     // vérification périodique quand l'appli est ouverte
+  DELETED_KEY: 'budget-patrimoine:sync:deleted', // suppressions faites sur CET appareil (ne reviennent jamais)
+  LOG_KEY: 'budget-patrimoine:sync:log',         // journal des dernières synchronisations
 
   $: (id) => document.getElementById(id),
   configured: () => !!(SUPABASE.url && SUPABASE.key),
@@ -190,9 +225,27 @@ const Sync = {
     }
     Sync.render();
     if (Sync.ready()) Sync.syncNow({ silent: true });
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && Sync.ready()) Sync.syncNow({ silent: true });
-    });
+    const wake = () => { if (!document.hidden && Sync.ready()) Sync.syncNow({ silent: true }); };
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('pageshow', wake);
+    window.addEventListener('online', wake);
+    Sync.startPolling();
+  },
+
+  /** Tant que l'appli est ouverte : vérifie toutes les minutes si un autre appareil a écrit (requête légère). */
+  startPolling() {
+    clearInterval(Sync._poll);
+    Sync._poll = setInterval(() => { if (!document.hidden && Sync.ready()) Sync.poll(); }, Sync.POLL_MS);
+  },
+
+  async poll() {
+    if (Sync.busy || !Sync.ready()) return;
+    try {
+      const rows = await Sync.api(`/rest/v1/vault?select=rev&user_id=eq.${Sync.session.user.id}`);
+      const rev = rows && rows[0] ? Number(rows[0].rev) : 0;
+      // Nouvelle version sur le serveur, ou dernière synchro en échec : on resynchronise
+      if (rev !== Number(Sync.meta && Sync.meta.rev) || Sync.lastError) Sync.syncNow({ silent: true });
+    } catch (e) { Sync.fail(e); }
   },
 
   ready: () => !!(Sync.configured() && Sync.session && Sync.key),
@@ -226,17 +279,27 @@ const Sync = {
   /* ---------- Supabase (REST) ---------- */
   async api(path, { method = 'GET', body, auth = true, headers = {} } = {}) {
     if (auth) await Sync.ensureFreshToken();
-    const res = await fetch(SUPABASE.url.replace(/\/$/, '') + path, {
-      method,
-      headers: {
-        apikey: SUPABASE.key,
-        'Content-Type': 'application/json',
-        ...(auth && Sync.session ? { Authorization: `Bearer ${Sync.session.access_token}` } : {}),
-        ...headers,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await res.text();
+    // Délai maximal : une requête bloquée (appli passée en arrière-plan…) ne doit jamais figer la synchro
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), Sync.TIMEOUT_MS);
+    let res; let text;
+    try {
+      res = await fetch(SUPABASE.url.replace(/\/$/, '') + path, {
+        method,
+        signal: ctl.signal,
+        headers: {
+          apikey: SUPABASE.key,
+          'Content-Type': 'application/json',
+          ...(auth && Sync.session ? { Authorization: `Bearer ${Sync.session.access_token}` } : {}),
+          ...headers,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      text = await res.text();
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error('le serveur ne répond pas (délai dépassé)');
+      throw e;
+    } finally { clearTimeout(timer); }
     let json = null; try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
     if (!res.ok) {
       const msg = (json && (json.msg || json.message || json.error_description || json.error)) || `HTTP ${res.status}`;
@@ -263,13 +326,23 @@ const Sync = {
     const s = Sync.session;
     if (!s) throw new Error('Non connecté.');
     if (s.expires_at - 60 > Date.now() / 1000) return;
-    try {
-      const n = await Sync.api('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: { refresh_token: s.refresh_token }, auth: false });
-      Sync.storeSession(n);
-    } catch (e) {
-      if (e.status === 400 || e.status === 401) { Sync.session = null; Sync.writeJSON(Sync.SESSION_KEY, null); Sync.render(); }
-      throw e;
+    // Un seul renouvellement à la fois (les jetons de renouvellement ne servent qu'une fois)
+    if (!Sync._refreshing) {
+      Sync._refreshing = (async () => {
+        try {
+          const n = await Sync.api('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: { refresh_token: s.refresh_token }, auth: false });
+          Sync.storeSession(n);
+        } catch (e) {
+          if (e.status === 400 || e.status === 401) {
+            Sync.session = null; Sync.writeJSON(Sync.SESSION_KEY, null);
+            Sync.lastError = 'session expirée : reconnectez-vous (Patrimoine → Synchronisation)';
+            Sync.render();
+          }
+          throw e;
+        } finally { Sync._refreshing = null; }
+      })();
     }
+    await Sync._refreshing;
   },
 
   async fetchVault() {
@@ -324,35 +397,67 @@ const Sync = {
    * autre appareil a écrit pendant ce temps (au plus 3 fois).
    */
   async syncNow({ silent = false } = {}) {
-    if (!Sync.ready()) return;
-    if (Sync.busy) { Sync.pendingPush = true; return; }
-    Sync.busy = true; Sync.setStatus('Synchronisation…');
+    if (!Sync.ready()) return false;
+    if (Sync.busy) {
+      // Une synchro bloquée depuis plus d'une minute ne doit pas empêcher toutes les suivantes
+      if (Date.now() - Sync.busySince < 60000) { Sync.pendingPush = true; return false; }
+      Sync.log({ ok: false, note: 'synchro précédente bloquée : relancée' });
+    }
+    Sync.busy = true; Sync.busySince = Date.now(); Sync.renderState('Synchronisation…');
+    let ok = false; let moved = false;
     try {
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 4 && !ok; attempt++) {
         const row = await Sync.fetchVault();
         const base = Sync.readJSON(Sync.BASE_KEY);
         const local = Sync.normalize(Sync.snapshot());
-        let merged = local; let rev = 0;
+        let merged = local; let rev = 0; let remote = null;
         if (row) {
-          const remote = Sync.normalize(await SyncCrypto.decrypt(Sync.key, row));
+          remote = Sync.normalize(await SyncCrypto.decrypt(Sync.key, row));
           merged = SyncCore.merge(base, local, remote, Sync.normalize);
           rev = Number(row.rev);
-          if (!SyncCore.same(merged, local)) Sync.applyLocal(merged);
-          if (SyncCore.same(merged, remote)) { Sync.done(merged, rev); break; }
         }
+        // Suppressions faites sur cet appareil : définitives
+        const dropped = SyncCore.dropDeleted(merged, Sync.readDeleted());
+        merged = dropped.data;
+        // L'utilisateur a modifié quelque chose pendant la synchro : on repart des données à jour
+        // (sinon la fusion, calculée sur l'ancienne version, écraserait son changement)
+        if (!SyncCore.same(Sync.normalize(Sync.snapshot()), local)) { moved = true; continue; }
+        moved = false;
+        if (!SyncCore.same(merged, local)) Sync.applyLocal(merged);
+        // Les éléments du serveur sont maintenant dans l'appareil : la base de comparaison suit le serveur,
+        // même si l'envoi échoue ensuite (sinon une suppression ultérieure ne serait pas reconnue)
+        if (remote) Sync.writeJSON(Sync.BASE_KEY, remote);
+        const entry = { base: !!base, L: SyncCore.counts(local), S: remote ? SyncCore.counts(remote) : null, M: SyncCore.counts(merged), tomb: dropped.removed };
+        if (remote && SyncCore.same(merged, remote)) { Sync.done(merged, rev); Sync.log({ ok: true, ...entry, note: 'à jour' }); ok = true; break; }
         const newRev = await Sync.writeVault(await SyncCrypto.encrypt(Sync.key, merged), rev);
-        if (newRev) { Sync.done(merged, newRev); break; }
-        if (attempt === 2) throw new Error('Conflit persistant avec un autre appareil, réessayez.');
+        if (newRev) { Sync.done(merged, newRev); Sync.log({ ok: true, ...entry, note: 'envoyé' }); ok = true; break; }
+        Sync.log({ ok: false, ...entry, note: 'conflit avec un autre appareil : nouvel essai' });
       }
-      if (!silent) Budget.toast('Synchronisé');
+      if (!ok) {
+        if (moved) Sync.pendingPush = true; // modifié pendant la synchro : on réessaie juste après
+        else throw new Error('conflit persistant avec un autre appareil, réessayez');
+      } else {
+        Sync.lastError = '';
+        if (!silent) Budget.toast('Synchronisé');
+      }
     } catch (e) {
-      console.warn('Synchronisation impossible', e);
-      Sync.setStatus(`Échec : ${e.message}`);
+      Sync.fail(e);
       if (!silent) alert('Synchronisation impossible : ' + e.message);
     } finally {
       Sync.busy = false;
+      Sync.render();
       if (Sync.pendingPush) { Sync.pendingPush = false; Sync.schedule(); }
     }
+    return ok;
+  },
+
+  /** Échec de synchro : mémorisé, journalisé et affiché en haut de Patrimoine. */
+  fail(e) {
+    console.warn('Synchronisation impossible', e);
+    const msg = (e && e.message) || String(e);
+    Sync.lastError = /failed to fetch|load failed|networkerror/i.test(msg) ? 'pas de connexion' : msg;
+    Sync.log({ ok: false, note: msg });
+    Sync.render();
   },
 
   done(data, rev) {
@@ -360,6 +465,51 @@ const Sync = {
     Sync.meta = { ...Sync.meta, rev, lastSync: new Date().toISOString() };
     Sync.writeJSON(Sync.META_KEY, Sync.meta);
     Sync.render();
+  },
+
+  /* ---------- Suppressions volontaires (ne reviennent jamais) ---------- */
+  readDeleted() {
+    const d = Sync.readJSON(Sync.DELETED_KEY) || {};
+    const limit = Date.now() - 90 * 86400000; // on oublie après 90 jours
+    for (const list of Object.keys(d)) for (const id of Object.keys(d[list])) if (d[list][id] < limit) delete d[list][id];
+    return d;
+  },
+
+  /** À appeler quand l'utilisateur supprime un élément (compte, bien, achat, vente, versement, mouvement). */
+  noteDeleted(list, id) {
+    const d = Sync.readDeleted();
+    (d[list] = d[list] || {})[String(id)] = Date.now();
+    Sync.writeJSON(Sync.DELETED_KEY, d);
+  },
+
+  /* ---------- Journal ---------- */
+  log(entry) {
+    const list = Sync.readJSON(Sync.LOG_KEY) || [];
+    list.unshift({ t: new Date().toISOString(), v: typeof APP_VERSION !== 'undefined' ? APP_VERSION : '?', ...entry });
+    Sync.writeJSON(Sync.LOG_KEY, list.slice(0, 15));
+  },
+
+  logLines() {
+    const f = (c) => (c ? `biens ${c.biens}, comptes ${c.comptes}, achats ${c.achats}` : '—');
+    return (Sync.readJSON(Sync.LOG_KEY) || []).map((e) => {
+      const t = new Date(e.t).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const detail = e.L ? ` · appareil [${f(e.L)}] · serveur [${f(e.S)}] → résultat [${f(e.M)}]${e.tomb ? ` · ${e.tomb} suppression(s) appliquée(s)` : ''}${e.base === false ? ' · sans base' : ''}` : '';
+      return `${t} · v${e.v} · ${e.ok ? 'OK' : 'ÉCHEC'} · ${e.note || ''}${detail}`;
+    });
+  },
+
+  /** Ligne d'état en haut de Patrimoine : on voit tout de suite si la synchro fonctionne. */
+  renderState(busyText) {
+    const el = Sync.$('p-sync-state');
+    if (!el) return;
+    if (!Sync.configured() || (!Sync.session && !Sync.lastError)) { el.hidden = true; return; }
+    el.hidden = false;
+    const last = Sync.meta && Sync.meta.lastSync;
+    const time = last ? new Date(last).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '';
+    el.className = 'hint sync-pill ' + (busyText ? '' : Sync.lastError ? 'bad' : 'good');
+    el.textContent = busyText ? `↻ ${busyText}`
+      : Sync.lastError ? `⚠︎ Synchro en échec : ${Sync.lastError}${last ? ` (dernière réussie à ${time})` : ''}`
+      : `● Synchronisé${time ? ` à ${time}` : ''}`;
   },
 
   /* ---------- Interface ---------- */
@@ -382,7 +532,14 @@ const Sync = {
     Sync.$('sync-connected').hidden = !Sync.ready();
     if (Sync.session) Sync.$('sync-email').textContent = Sync.session.user.email;
     const last = Sync.meta && Sync.meta.lastSync;
-    Sync.setStatus(last ? `Dernière synchro : ${new Date(last).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}` : 'Jamais synchronisé sur cet appareil.');
+    Sync.setStatus((last ? `Dernière synchro : ${new Date(last).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}` : 'Jamais synchronisé sur cet appareil.')
+      + (Sync.lastError ? ` · Échec : ${Sync.lastError}` : ''));
+    Sync.renderState();
+    const box = Sync.$('sync-log-box');
+    if (box) {
+      box.hidden = !Sync.configured() || !Sync.session;
+      Sync.$('sync-log').replaceChildren(...[`Appli v${typeof APP_VERSION !== 'undefined' ? APP_VERSION : '?'}`, ...Sync.logLines()].map((l) => { const p = document.createElement('p'); p.textContent = l; return p; }));
+    }
   },
 
   showError(id, msg) { const el = Sync.$(id); el.textContent = msg; el.hidden = !msg; },

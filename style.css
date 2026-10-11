@@ -544,3 +544,19 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .lock-box .link-btn { display: block; margin: 8px auto 0; }
 .lock-keys button.lock-bio { font-size: 14px; }
 .asset-rate { width: 64px !important; text-align: right; min-height: 36px; margin-top: 0 !important; font-size: 15px; padding: 0 8px; }
+
+/* ---------- État de la synchronisation (v2.9.4) ---------- */
+.sync-pill { margin: 8px 0 0; font-size: 13px; }
+.sync-pill.good { color: var(--good); }
+.sync-pill.bad { color: var(--bad); font-weight: 600; }
+.sync-log p { margin: 4px 0; font-size: 12px; overflow-wrap: anywhere; }
+#sync-log-box { margin-top: 8px; }
+#sync-log-box summary { cursor: pointer; }
+
+/* ---------- État de la synchronisation (v2.9.4) ---------- */
+.sync-pill { margin: 8px 0 0; font-size: 13px; }
+.sync-pill.good { color: var(--good); }
+.sync-pill.bad { color: var(--bad); font-weight: 600; }
+.sync-log p { margin: 4px 0; font-size: 12px; overflow-wrap: anywhere; }
+#sync-log-box { margin-top: 8px; }
+#sync-log-box summary { cursor: pointer; }

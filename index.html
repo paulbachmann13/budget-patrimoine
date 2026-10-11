@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.9.3">
+  <link rel="stylesheet" href="style.css?v=2.9.4">
 </head>
 <body>
   <header class="topbar">
@@ -41,6 +41,7 @@
         <p class="hero-value" id="p-total">0,00 €</p>
         <div class="split-bar" id="p-split" aria-hidden="true"></div>
         <p class="hint" id="p-assets-line" hidden></p>
+        <p class="hint sync-pill" id="p-sync-state" hidden></p>
       </div>
 
       <div class="kpis">
@@ -162,6 +163,10 @@
           <button class="btn btn-danger" id="btn-sync-logout" type="button">Se déconnecter de cet appareil</button>
         </div>
         <p class="hint" id="sync-status"></p>
+        <details id="sync-log-box" hidden>
+          <summary class="hint">Détails de la synchronisation (en cas de souci)</summary>
+          <div id="sync-log" class="hint sync-log"></div>
+        </details>
         <p class="hint">Serveur gratuit : il se met en pause après une semaine sans activité (une tâche automatique le garde éveillé). En cas de pause, relancez-le depuis supabase.com : les données ne sont pas perdues.</p>
       </div>
 
@@ -737,9 +742,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.9.3"></script>
-  <script src="app.js?v=2.9.3"></script>
-  <script src="sync.js?v=2.9.3"></script>
-  <script src="lock.js?v=2.9.3"></script>
+  <script src="budget.js?v=2.9.4"></script>
+  <script src="app.js?v=2.9.4"></script>
+  <script src="sync.js?v=2.9.4"></script>
+  <script src="lock.js?v=2.9.4"></script>
 </body>
 </html>

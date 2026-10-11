@@ -152,3 +152,40 @@ test('fusion : suppression conservée même si les appareils n\'ont pas la même
   // Et la suppression locale gagne contre une copie distante inchangée (ancienne représentation)
   assert.deepEqual(M.merge(base, local, remote, normalize).budget.assets, []);
 });
+
+test('suppressions volontaires : retirées de la fusion, listes concernées seulement, éléments voisins intacts', () => {
+  const data = {
+    budget: { transactions: [{ id: 'a' }], assets: [{ id: 'car' }, { id: 'house' }], accounts: [{ id: 'car' }] },
+    pea: { purchases: [{ id: 'p1' }, { id: 'p2' }], deposits: [], sales: [], moves: [] },
+  };
+  const { data: out, removed } = M.dropDeleted(data, { assets: { car: 1 }, purchases: { p2: 1 }, transactions: { a: 1 } });
+  assert.deepEqual(out.budget.assets, [{ id: 'house' }]);
+  assert.deepEqual(out.budget.accounts, [{ id: 'car' }], 'même id dans une autre liste : conservé');
+  assert.deepEqual(out.pea.purchases, [{ id: 'p1' }]);
+  assert.deepEqual(out.budget.transactions, [{ id: 'a' }], 'liste non supprimable : intacte');
+  assert.equal(removed, 2);
+  assert.equal(data.budget.assets.length, 2, 'les données d\'origine ne sont pas modifiées');
+  assert.equal(M.dropDeleted(data, null).removed, 0);
+  assert.equal(M.dropDeleted(data, { assets: {} }).removed, 0);
+  assert.equal(M.dropDeleted(data, { assets: { constructor: 1 } }).removed, 0, 'pas d\'effet de bord sur les noms spéciaux');
+});
+
+test('suppression sans base de comparaison : la fusion seule ramène l\'élément, la suppression volontaire non', () => {
+  const car = { id: 'car', name: 'Voiture', kind: 'vehicule', value: 1000, date: '2026-10-11', depreciation: 0 };
+  const empty = { transactions: [], rules: [], accounts: [], categories: [], history: [] };
+  const pea = { purchases: [], deposits: [] };
+  const local = { budget: { ...empty, assets: [] }, pea };
+  const remote = { budget: { ...empty, assets: [car] }, pea };
+  // Base absente ou périmée : la voiture du serveur est ré-adoptée…
+  assert.equal(M.merge(null, local, remote, normalize).budget.assets.length, 1);
+  assert.equal(M.merge({ budget: { ...empty, assets: [] }, pea }, local, remote, normalize).budget.assets.length, 1);
+  // …sauf si l'utilisateur l'a supprimée sur cet appareil
+  const merged = M.merge(null, local, remote, normalize);
+  assert.deepEqual(M.dropDeleted(merged, { assets: { car: Date.now() } }).data.budget.assets, []);
+});
+
+test('journal : comptage des éléments suivis', () => {
+  assert.deepEqual(M.counts({ budget: { assets: [1, 2], accounts: [1], transactions: [1, 2, 3] }, pea: { purchases: [1], sales: [] } }),
+    { biens: 2, comptes: 1, transactions: 3, achats: 1, ventes: 0 });
+  assert.deepEqual(M.counts(null), { biens: 0, comptes: 0, transactions: 0, achats: 0, ventes: 0 });
+});

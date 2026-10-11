@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.9.3'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.9.4'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -1372,10 +1372,10 @@ const App = {
       }
       // Synchro chiffrée d'abord : on récupère les modifs faites sur les autres appareils
       const synced = typeof Sync !== 'undefined' && Sync.ready();
-      if (synced) await Sync.syncNow({ silent: true });
+      const syncOk = synced ? await Sync.syncNow({ silent: true }) : false;
       await App.refreshQuotes({ silent: true });
       const { ok, total } = await App.refreshAllLive({ silent: true, force: true });
-      App.toast(`Appli à jour (v${APP_VERSION})` + (synced ? ' · synchronisée' : '') + (total ? (ok === total ? ' · cours actualisés' : ` · ${ok}/${total} cours actualisé(s)`) : ''));
+      App.toast(`Appli à jour (v${APP_VERSION})` + (synced ? (syncOk ? ' · synchronisée' : ' · synchro en échec (voir Patrimoine)') : '') + (total ? (ok === total ? ' · cours actualisés' : ` · ${ok}/${total} cours actualisé(s)`) : ''));
     } catch (e) {
       console.warn('Actualisation impossible', e);
       App.toast('Actualisation impossible (hors ligne ?)');
@@ -2004,6 +2004,7 @@ const App = {
   deletePurchase(id) {
     const p = App.state.purchases.find((x) => x.id === id);
     if (!p || !confirm(`Supprimer l'achat ${p.ticker} du ${Fmt.date(p.date)} ?`)) return;
+    if (typeof Sync !== 'undefined') Sync.noteDeleted('purchases', id);
     App.state.purchases = App.state.purchases.filter((x) => x.id !== id);
     App.persist();
     App.renderAll();
@@ -2102,6 +2103,7 @@ const App = {
   deleteSale(id) {
     const s = App.state.sales.find((x) => x.id === id);
     if (!s || !confirm(`Supprimer la vente ${s.ticker} du ${Fmt.date(s.date)} ?`)) return;
+    if (typeof Sync !== 'undefined') Sync.noteDeleted('sales', id);
     App.state.sales = App.state.sales.filter((x) => x.id !== id);
     App.persist();
     App.renderAll();
@@ -2717,6 +2719,7 @@ const App = {
       del.textContent = '✕';
       del.addEventListener('click', () => {
         if (!confirm(`Supprimer : ${App.MOVE_LABELS[d.kind].toLowerCase()} de ${Fmt.eur(d.amount)} du ${Fmt.date(d.date)} ?`)) return;
+        if (typeof Sync !== 'undefined') Sync.noteDeleted(d.list, d.id);
         App.state[d.list] = App.state[d.list].filter((x) => x.id !== d.id);
         App.persist();
         App.renderAll();
