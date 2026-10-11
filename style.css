@@ -23,6 +23,7 @@
   --series-rate: #d95926;   /* hypothèse de rendement (pointillés) */
   --good: #0ca30c;
   --bad: #e66767;
+  --warn: #e3a33b;
   --radius: 16px;
   --tap: 52px;               /* hauteur minimale des zones tactiles */
   --tabbar-h: 64px;
@@ -47,6 +48,7 @@
   --series-rate: #eb6834;
   --good: #006300;
   --bad: #d03b3b;
+  --warn: #a86600;
 }
 
 * { box-sizing: border-box; }
@@ -457,3 +459,20 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1
 .account-date { margin-top: 2px !important; }
 .icon-btn.small { width: 32px; height: 32px; font-size: 18px; flex: none; }
 #account-form { margin-top: 16px; }
+
+/* ---------- Rappels, plafonds, évolution, historique (v2.3) ---------- */
+.reminders .banner { border-left-color: var(--warn); }
+.chart.chart-small { height: 150px; margin-top: 8px; }
+.budget-row.ok .cat-bar span { background: var(--good); }
+.budget-row.warn .cat-bar span { background: var(--warn); }
+.budget-row.over .cat-bar span { background: var(--bad); }
+.budget-row.over .cat-head b { color: var(--bad); }
+.budget-alert { margin: 0 0 10px; color: var(--bad); }
+.trend { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.cat-manage-row + .cat-manage-row { border-top: 1px solid var(--border); padding-top: 10px; }
+.cat-manage-line { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 6px; }
+.cat-manage-line > :only-child { grid-column: 1 / -1; }
+.cat-manage-line select, .cat-manage-line input { min-width: 0; min-height: 40px; margin-top: 0; padding: 0 8px; font-size: 16px; }
+.cat-manage-line input { text-align: right; }
+.tx-label { cursor: pointer; }
+.tx-label.full { color: var(--ink-2); font-size: 13px; }

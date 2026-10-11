@@ -19,8 +19,10 @@
    ========================================================================== */
 const BudgetCore = (() => {
   const NEUTRAL = 'neutre';
+  const AID = 'aide'; // revenu reçu (aide familiale…) : compté dans les revenus, mais affiché à part
+  const KINDS = ['depense', 'revenu', AID, NEUTRAL];
 
-  /** Catégories de départ. kind : 'depense' | 'revenu' | 'neutre' (hors totaux). */
+  /** Catégories de départ. kind : 'depense' | 'revenu' | 'aide' | 'neutre' (hors totaux). */
   const DEFAULT_CATEGORIES = [
     { name: 'Alimentation & restauration', kind: 'depense' },
     { name: 'Bar / Café', kind: 'depense' },
@@ -292,25 +294,173 @@ const BudgetCore = (() => {
 
   /** Totaux d'un mois : revenus, dépenses, net, taux d'épargne, détail par catégorie. */
   function summarizeMonth(transactions, month, categories) {
-    let income = 0; let expense = 0; let neutralIn = 0; let neutralOut = 0;
+    let income = 0; let aid = 0; let expense = 0; let neutralIn = 0; let neutralOut = 0;
     const byCat = new Map();
     for (const t of transactions) {
       if (monthOf(t.date) !== month) continue;
       const kind = t.category === UNCATEGORIZED ? (t.amount > 0 ? 'revenu' : 'depense') : kindOf(t.category, categories);
       if (kind === NEUTRAL) { if (t.amount > 0) neutralIn += t.amount; else neutralOut += -t.amount; continue; }
       byCat.set(t.category, (byCat.get(t.category) || 0) + t.amount);
-      if (kind === 'revenu') income += t.amount; else expense += -t.amount;
+      if (kind === 'revenu' || kind === AID) { income += t.amount; if (kind === AID) aid += t.amount; } else expense += -t.amount;
     }
     // Un remboursement positif dans une catégorie de dépenses réduit la dépense (déjà net via expense += -amount)
     const net = income - expense;
     const cats = [...byCat.entries()].map(([name, sum]) => ({ name, sum, kind: name === UNCATEGORIZED ? (sum > 0 ? 'revenu' : 'depense') : kindOf(name, categories) }));
     const spending = cats.filter((c) => c.kind === 'depense' && c.sum < 0).map((c) => ({ name: c.name, amount: -c.sum })).sort((a, b) => b.amount - a.amount);
-    const incomes = cats.filter((c) => c.kind === 'revenu' && c.sum > 0).map((c) => ({ name: c.name, amount: c.sum })).sort((a, b) => b.amount - a.amount);
+    const incomes = cats.filter((c) => (c.kind === 'revenu' || c.kind === AID) && c.sum > 0).map((c) => ({ name: c.name, amount: c.sum, aid: c.kind === AID })).sort((a, b) => b.amount - a.amount);
     return {
       month, income, expense, net,
+      aid, ownIncome: income - aid,
       savingsRate: income > 0 ? net / income : null,
       neutralIn, neutralOut, spending, incomes,
     };
+  }
+
+  /* ---------- Mois ---------- */
+
+  /** Les n mois qui finissent par month (inclus), du plus ancien au plus récent. */
+  function lastMonths(month, n) {
+    let [y, m] = month.split('-').map(Number);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      out.unshift(`${y}-${String(m).padStart(2, '0')}`);
+      m--; if (m < 1) { m = 12; y--; }
+    }
+    return out;
+  }
+
+  /** Nombre de jours entre deux dates 'AAAA-MM-JJ' (b − a). */
+  function daysBetween(a, b) {
+    const t = (iso) => Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+    return Math.round((t(b) - t(a)) / 86400000);
+  }
+
+  /* ---------- Libellés lisibles ---------- */
+
+  /**
+   * Libellé court pour l'affichage (le libellé complet reste stocké et cherchable).
+   * Formats Crédit Agricole : « Paiement par carte X1234 COMMERCE VILLE 12/05 - Nom »,
+   * « Virement en votre faveur … », « Virement émis … », « Prélèvement … », « Retrait au distributeur … ».
+   */
+  function displayLabel(label) {
+    const s = String(label || '').replace(/\s+/g, ' ').trim();
+    // Références techniques (longues suites de lettres et de chiffres), « NOTPROVID »
+    const clean = (x) => x
+      .replace(/\b(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{16,}\b/g, ' ')
+      .replace(/\bNOTPROVID\b/g, ' ')
+      .replace(/\s+-\s*$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const cut = (x) => (x.length > 60 ? x.slice(0, 59).trimEnd() + '…' : x);
+    let m = s.match(/^(Paiement par carte|Avoir)\s+(?:CARTE\s+)?X\d{4}\s+(.*?)(?:\s+\d{2}\/\d{2}(?:\s+\d{2}H\d{2})?)?(?:\s+-\s+(.+))?$/i);
+    if (m) {
+      const name = clean(m[3] || m[2]) || clean(m[2]);
+      return cut(/^avoir/i.test(m[1]) ? `Avoir · ${name}` : name);
+    }
+    m = s.match(/^Retrait au distributeur\s+(?:X\d{4}\s+)?(.*?)(?:\s+\d{2}\/\d{2}.*)?$/i);
+    if (m) return cut(`Retrait · ${clean(m[1])}`.replace(/ · $/, ''));
+    m = s.match(/^Virement en votre faveur\s*(.*)$/i);
+    if (m) return cut(`Virement reçu · ${clean(m[1].replace(/^(VIR INST (WERO )?de |DE )/i, ''))}`.replace(/ · $/, ''));
+    m = s.match(/^Virement [ée]mis\s*(.*)$/i);
+    if (m) return cut(`Virement émis · ${clean(m[1].replace(/^(VIR INST (WERO )?vers |Wero vers |WEB )/i, ''))}`.replace(/ · $/, ''));
+    m = s.match(/^Pr[ée]l[èe]vement\s*(.*)$/i);
+    if (m) return cut(`Prélèvement · ${clean(m[1].split(' - ')[0].replace(/^\d+\s+/, ''))}`.replace(/ · $/, ''));
+    return cut(clean(s) || s);
+  }
+
+  /* ---------- Plafonds par catégorie ---------- */
+
+  /** Dépense nette d'une catégorie sur une liste de mois (un remboursement la réduit). */
+  function spentIn(transactions, category, months) {
+    const set = new Set(months);
+    let sum = 0;
+    for (const t of transactions) if (t.category === category && set.has(monthOf(t.date))) sum += t.amount;
+    return Math.max(0, Math.round(-sum * 100) / 100);
+  }
+
+  /**
+   * État des plafonds pour le mois affiché.
+   * budgets : { catégorie: { limit, period: 'mois' | 'an' } } — 'an' = 12 mois glissants jusqu'au mois affiché.
+   * level : 'ok' (< 80 %), 'warn' (80 à 100 %), 'over' (dépassé).
+   */
+  function budgetStatus(transactions, month, budgets) {
+    return Object.entries(budgets || {})
+      .filter(([, b]) => b && b.limit > 0)
+      .map(([name, b]) => {
+        const period = b.period === 'an' ? 'an' : 'mois';
+        const spent = spentIn(transactions, name, period === 'an' ? lastMonths(month, 12) : [month]);
+        const ratio = spent / b.limit;
+        return { name, limit: b.limit, period, spent, ratio, level: ratio >= 1 ? 'over' : ratio >= 0.8 ? 'warn' : 'ok' };
+      })
+      .sort((a, b) => b.ratio - a.ratio || a.name.localeCompare(b.name));
+  }
+
+  /* ---------- Évolution d'une catégorie ---------- */
+
+  /**
+   * Montants mensuels d'une catégorie sur n mois finissant par endMonth, et total des
+   * n mois précédents (comparaison). Dépense : montant positif ; revenu : montant reçu.
+   */
+  function categorySeries(transactions, category, endMonth, categories, n = 12) {
+    const kind = kindOf(category, categories);
+    const sign = kind === 'revenu' || kind === AID ? 1 : -1;
+    const months = lastMonths(endMonth, n * 2);
+    const sums = new Map(months.map((m) => [m, 0]));
+    for (const t of transactions) {
+      if (t.category !== category) continue;
+      const m = monthOf(t.date);
+      if (!sums.has(m)) continue;
+      sums.set(m, sums.get(m) + t.amount);
+    }
+    const prev = months.slice(0, n);
+    const cur = months.slice(n);
+    // Comparaison seulement si l'historique couvre toute la période précédente
+    const firstDate = transactions.reduce((min, t) => (!min || t.date < min ? t.date : min), null);
+    const previousHasData = !!firstDate && monthOf(firstDate) <= prev[0];
+    const round = (v) => Math.round(v * 100) / 100;
+    const series = cur.map((m) => ({ month: m, amount: round(sign * sums.get(m)) }));
+    return {
+      series,
+      total: round(series.reduce((s, x) => s + x.amount, 0)),
+      previousTotal: previousHasData ? round(sign * prev.reduce((s, m) => s + sums.get(m), 0)) : null,
+    };
+  }
+
+  /* ---------- Historique du patrimoine ---------- */
+
+  /** Enregistre (ou met à jour) le total du mois. Retourne { history, changed }. */
+  function upsertSnapshot(history, month, { cash, pea }) {
+    // À l'euro près : évite d'enregistrer (et de synchroniser) chaque petite variation du cours
+    const r = (v) => Math.round(Number(v) || 0);
+    const snap = { month, cash: r(cash), pea: r(pea), total: r(r(cash) + r(pea)) };
+    const list = (Array.isArray(history) ? history : []).filter((h) => h.month !== month);
+    const old = (history || []).find((h) => h.month === month);
+    const changed = !old || old.cash !== snap.cash || old.pea !== snap.pea;
+    list.push(changed ? snap : old);
+    list.sort((a, b) => a.month.localeCompare(b.month));
+    return { history: list.slice(-240), changed };
+  }
+
+  /* ---------- Rappels ---------- */
+
+  /**
+   * Rappels à afficher : import bancaire ancien (> 31 jours), sauvegarde chiffrée
+   * absente ou ancienne (> 60 jours). Sans transaction, aucun rappel.
+   */
+  function reminders(state, today) {
+    const out = [];
+    const tx = state.transactions || [];
+    if (!tx.length) return out;
+    const lastTx = tx.reduce((max, t) => (t.date > max ? t.date : max), tx[0].date);
+    const lastImport = state.lastImport && state.lastImport > lastTx ? state.lastImport : lastTx;
+    const d = daysBetween(lastImport, today);
+    if (d > 31) out.push({ id: 'import', text: `Dernier import bancaire il y a ${d} jours : exportez le CSV « Depuis le dernier téléchargement » et importez-le.` });
+    if (!state.lastEncryptedExport) out.push({ id: 'backup', text: 'Aucune sauvegarde chiffrée pour l\'instant : exportez-en une (onglet Patrimoine) et gardez-la dans iCloud Drive.' });
+    else {
+      const b = daysBetween(state.lastEncryptedExport, today);
+      if (b > 60) out.push({ id: 'backup', text: `Dernière sauvegarde chiffrée il y a ${b} jours : pensez à en refaire une (onglet Patrimoine).` });
+    }
+    return out;
   }
 
   /** Liste triée des mois présents ('AAAA-MM'). */
@@ -351,10 +501,11 @@ const BudgetCore = (() => {
   }
 
   return {
-    NEUTRAL, DEFAULT_CATEGORIES, DEFAULT_RULES, UNCATEGORIZED,
+    NEUTRAL, AID, KINDS, DEFAULT_CATEGORIES, DEFAULT_RULES, UNCATEGORIZED,
     normLabel, ruleKey, parseDate, parseAmount,
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
+    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, upsertSnapshot, reminders,
   };
 })();
 
@@ -372,7 +523,11 @@ const BudgetStore = {
       rules: [],          // règles de l'utilisateur [{match, category, sign?}]
       categories: BudgetCore.DEFAULT_CATEGORIES.map((c) => ({ ...c })),
       accounts: [],       // comptes de patrimoine saisis à la main [{id, name, balance, date}]
+      budgets: {},        // plafonds { catégorie: { limit, period: 'mois' | 'an' } }
+      history: [],        // patrimoine mois par mois [{month, cash, pea, total}]
       lastExport: null,
+      lastImport: null,           // dernier import bancaire (rappel)
+      lastEncryptedExport: null,  // dernière sauvegarde chiffrée (rappel)
     };
   },
 
@@ -395,7 +550,7 @@ const BudgetStore = {
       const name = text(c && c.name, 60).trim();
       if (!name || seenCat.has(name) || name === BudgetCore.UNCATEGORIZED) continue;
       seenCat.add(name);
-      categories.push({ name, kind: ['depense', 'revenu', BudgetCore.NEUTRAL].includes(c.kind) ? c.kind : 'depense' });
+      categories.push({ name, kind: BudgetCore.KINDS.includes(c.kind) ? c.kind : 'depense' });
     }
     const transactions = [];
     for (const t of data.transactions) {
@@ -424,10 +579,29 @@ const BudgetStore = {
       if (!name || !Number.isFinite(balance)) { dropped++; continue; }
       accounts.push({ id: uid(a.id), name, balance, date: BudgetCore.parseDate(a.date) || '' });
     }
+    const budgets = {};
+    for (const [name, b] of Object.entries(data.budgets && typeof data.budgets === 'object' ? data.budgets : {})) {
+      const limit = Number(b && b.limit);
+      const n = text(name, 60).trim();
+      if (!n || !(limit > 0) || !Number.isFinite(limit)) continue;
+      budgets[n] = { limit: Math.round(limit * 100) / 100, period: b.period === 'an' ? 'an' : 'mois' };
+    }
+    const history = [];
+    const seenMonth = new Set();
+    for (const h of Array.isArray(data.history) ? data.history : []) {
+      const month = String(h && h.month);
+      const cash = Number(h && h.cash); const pea = Number(h && h.pea);
+      if (!/^\d{4}-\d{2}$/.test(month) || seenMonth.has(month) || !Number.isFinite(cash) || !Number.isFinite(pea)) continue;
+      seenMonth.add(month);
+      history.push({ month, cash, pea, total: Math.round((cash + pea) * 100) / 100 });
+    }
+    history.sort((a, b) => a.month.localeCompare(b.month));
     return {
       state: {
-        version: 1, transactions, rules, categories, accounts,
+        version: 1, transactions, rules, categories, accounts, budgets, history,
         lastExport: BudgetCore.parseDate(data.lastExport) || null,
+        lastImport: BudgetCore.parseDate(data.lastImport) || null,
+        lastEncryptedExport: BudgetCore.parseDate(data.lastEncryptedExport) || null,
       },
       dropped,
     };
@@ -517,7 +691,7 @@ const Budget = {
     Budget.renderPatrimoine();
   },
 
-  renderCharts() { if (Budget.state) Budget.renderBars(); },
+  renderCharts() { if (Budget.state) { Budget.renderBars(); Budget.renderTrend(); Budget.renderHistory(); } },
 
   monthLabel(month) {
     const [y, m] = month.split('-').map(Number);
@@ -542,6 +716,12 @@ const Budget = {
     Budget.$('b-neutral').textContent = sum.neutralIn || sum.neutralOut
       ? `Hors totaux : ${Fmt.eur(sum.neutralOut)} sortis, ${Fmt.eur(sum.neutralIn)} entrés (épargne, virements internes).`
       : '';
+    // Revenus propres et aide reçue, séparés
+    const split = Budget.$('b-income-split');
+    if (sum.aid) {
+      const own = sum.ownIncome - sum.expense;
+      split.textContent = `Dont revenus propres ${Fmt.eur(sum.ownIncome)} et aide reçue ${Fmt.eur(sum.aid)}. Sans l'aide, le solde du mois serait de ${Fmt.signedEur(own)}.`;
+    } else split.textContent = '';
 
     // Dépenses par catégorie (barres horizontales ; touche = filtre la liste)
     const box = Budget.$('b-categories');
@@ -565,11 +745,84 @@ const Budget = {
       box.appendChild(row);
     });
     Budget.$('b-categories-empty').hidden = sum.spending.length > 0;
+    Budget.$('b-categories-hint').hidden = !sum.spending.length || !!Budget.catFilter;
     Budget.$('btn-clear-filter').hidden = !Budget.catFilter;
 
     Budget.renderBars();
+    Budget.renderBudgets();
+    Budget.renderTrend();
     Budget.renderList();
     Budget.renderPatrimoine();
+  },
+
+  /** Plafonds du mois affiché : jauge par catégorie, alerte si dépassement. */
+  renderBudgets() {
+    const s = Budget.state;
+    const list = BudgetCore.budgetStatus(s.transactions, Budget.month, s.budgets);
+    const box = Budget.$('b-budgets');
+    box.replaceChildren();
+    list.forEach((b) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `cat-row budget-row ${b.level}` + (Budget.catFilter === b.name ? ' active' : '');
+      const head = document.createElement('div'); head.className = 'cat-head';
+      const name = document.createElement('span'); name.textContent = b.period === 'an' ? `${b.name} (12 mois)` : b.name;
+      const val = document.createElement('b'); val.textContent = `${Fmt.eur0(b.spent)} / ${Fmt.eur0(b.limit)}`;
+      head.append(name, val);
+      const bar = document.createElement('div'); bar.className = 'cat-bar';
+      const fill = document.createElement('span');
+      fill.style.width = `${Math.min(100, Math.max(2, b.ratio * 100))}%`;
+      bar.appendChild(fill);
+      row.append(head, bar);
+      row.addEventListener('click', () => { Budget.catFilter = Budget.catFilter === b.name ? null : b.name; Budget.renderMonth(); });
+      box.appendChild(row);
+    });
+    Budget.$('b-budgets-empty').hidden = list.length > 0;
+    const over = list.filter((b) => b.level === 'over');
+    const alert = Budget.$('b-budget-alert');
+    alert.hidden = !over.length;
+    alert.textContent = over.length
+      ? `⚠︎ ${over.length} plafond${over.length > 1 ? 's' : ''} dépassé${over.length > 1 ? 's' : ''} : ` + over.map((b) => `${b.name} (+${Fmt.eur0(b.spent - b.limit)})`).join(', ')
+      : '';
+  },
+
+  /** Évolution sur 12 mois de la catégorie touchée (et comparaison avec les 12 mois d'avant). */
+  renderTrend() {
+    const box = Budget.$('b-trend');
+    const cat = Budget.catFilter;
+    box.hidden = !cat;
+    if (!cat) return;
+    const s = Budget.state;
+    const { series, total, previousTotal } = BudgetCore.categorySeries(s.transactions, cat, Budget.month, s.categories);
+    Budget.$('b-trend-title').textContent = `${cat} : 12 derniers mois`;
+    const months = series.filter((x) => x.amount > 0).length || 1;
+    let summary = `Total ${Fmt.eur0(total)} · moyenne ${Fmt.eur0(total / months)} par mois actif.`;
+    if (previousTotal !== null) {
+      const diff = total - previousTotal;
+      summary += ` 12 mois d'avant : ${Fmt.eur0(previousTotal)} (${diff >= 0 ? '+' : '−'}${Fmt.eur0(Math.abs(diff))}).`;
+    } else summary += ' Pas encore assez d\'historique pour comparer avec l\'année d\'avant.';
+    Budget.$('b-trend-summary').textContent = summary;
+
+    const el = Budget.$('b-trend-chart');
+    el.innerHTML = '';
+    const W = el.clientWidth || 320; const H = el.clientHeight || 150;
+    const m = { top: 8, right: 4, bottom: 22, left: 4 };
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' }, el);
+    const max = Math.max(1, ...series.map((x) => x.amount));
+    const slot = (W - m.left - m.right) / series.length;
+    const bw = Math.min(18, slot * 0.6);
+    series.forEach((x, i) => {
+      const cx = m.left + slot * i + slot / 2;
+      const h = (Math.max(0, x.amount) / max) * (H - m.top - m.bottom);
+      if (x.month === Budget.month) svgEl('rect', { x: cx - slot / 2 + 1, y: 0, width: slot - 2, height: H, rx: 6, style: 'fill: var(--surface-2)' }, svg);
+      svgEl('rect', { x: cx - bw / 2, y: H - m.bottom - h, width: bw, height: h, rx: 2, style: `fill: ${Budget.catColor(cat, 0)}` }, svg);
+      const lab = svgEl('text', { x: cx, y: H - 6, 'text-anchor': 'middle', class: 'tick' }, svg);
+      lab.textContent = new Date(+x.month.slice(0, 4), +x.month.slice(5) - 1, 1).toLocaleDateString('fr-FR', { month: 'narrow' });
+      const hit = svgEl('rect', { x: cx - slot / 2, y: 0, width: slot, height: H, fill: 'transparent', style: 'cursor:pointer' }, svg);
+      const tip = svgEl('title', {}, hit); tip.textContent = `${Budget.monthLabel(x.month)} : ${Fmt.eur(x.amount)}`;
+      hit.addEventListener('click', () => { Budget.month = x.month; Budget.renderMonth(); });
+    });
+    svgEl('line', { x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom, class: 'baseline' }, svg);
   },
 
   catColor(name, i) {
@@ -629,7 +882,13 @@ const Budget = {
       const li = document.createElement('div');
       li.className = 'tx';
       const top = document.createElement('div'); top.className = 'tx-top';
-      const label = document.createElement('span'); label.className = 'tx-label'; label.textContent = t.label;
+      // Libellé court ; une touche affiche le libellé complet de la banque
+      const label = document.createElement('span'); label.className = 'tx-label'; label.textContent = BudgetCore.displayLabel(t.label);
+      label.title = t.label;
+      label.addEventListener('click', () => {
+        const full = label.classList.toggle('full');
+        label.textContent = full ? t.label : BudgetCore.displayLabel(t.label);
+      });
       const amt = document.createElement('b'); amt.className = Fmt.trend(t.amount); amt.textContent = Fmt.signedEur(t.amount);
       top.append(label, amt);
       const bottom = document.createElement('div'); bottom.className = 'tx-bottom';
@@ -699,6 +958,71 @@ const Budget = {
     Budget.$('rules-count').textContent = Budget.state.rules.length
       ? `${Budget.state.rules.length} règle(s) personnelle(s) enregistrée(s).`
       : 'Aucune règle personnelle : seules les règles génériques sont utilisées.';
+    Budget.renderCategoriesManage();
+  },
+
+  KIND_LABELS: { depense: 'Dépense', revenu: 'Revenu', aide: 'Aide reçue', neutre: 'Hors totaux' },
+
+  /** Type de chaque catégorie et plafond de dépense (par mois ou 12 mois glissants). */
+  renderCategoriesManage() {
+    const s = Budget.state;
+    const box = Budget.$('cat-manage');
+    box.replaceChildren();
+    const used = new Set(s.transactions.map((t) => t.category));
+    const ordered = [...s.categories].sort((a, b) => (used.has(b.name) - used.has(a.name)) || a.name.localeCompare(b.name));
+    ordered.forEach((c) => {
+      const row = document.createElement('div'); row.className = 'cat-manage-row';
+      const name = document.createElement('p'); name.className = 'label'; name.textContent = c.name;
+      const line = document.createElement('div'); line.className = 'cat-manage-line';
+      const kind = document.createElement('select');
+      kind.setAttribute('aria-label', `Type de ${c.name}`);
+      BudgetCore.KINDS.forEach((k) => { const o = document.createElement('option'); o.value = k; o.textContent = Budget.KIND_LABELS[k]; kind.appendChild(o); });
+      kind.value = c.kind;
+      kind.addEventListener('change', () => { c.kind = kind.value; if (c.kind !== 'depense') delete s.budgets[c.name]; Budget.persist(); Budget.render(); });
+      line.appendChild(kind);
+      if (c.kind === 'depense') {
+        const b = s.budgets[c.name];
+        const limit = document.createElement('input');
+        limit.type = 'text'; limit.inputMode = 'decimal'; limit.placeholder = 'Plafond €';
+        limit.value = b ? Fmt.input(b.limit) : '';
+        limit.setAttribute('aria-label', `Plafond de ${c.name} en euros`);
+        const period = document.createElement('select');
+        period.setAttribute('aria-label', `Période du plafond de ${c.name}`);
+        [['mois', '/ mois'], ['an', '/ 12 mois']].forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; period.appendChild(o); });
+        period.value = b ? b.period : 'mois';
+        const save = () => {
+          const v = BudgetCore.parseAmount(limit.value);
+          if (!limit.value.trim() || !(v > 0)) { delete s.budgets[c.name]; limit.value = ''; } else s.budgets[c.name] = { limit: Math.round(v * 100) / 100, period: period.value };
+          Budget.persist(); Budget.renderMonth();
+        };
+        limit.addEventListener('change', save);
+        period.addEventListener('change', () => { if (s.budgets[c.name]) save(); });
+        line.append(limit, period);
+      }
+      row.append(name, line);
+      box.appendChild(row);
+    });
+  },
+
+  /** Bandeaux de rappel (import bancaire, sauvegarde chiffrée) en haut des onglets Patrimoine et Budget. */
+  renderReminders() {
+    const list = BudgetCore.reminders(Budget.state, Dates.today());
+    for (const id of ['p-reminders', 'b-reminders']) {
+      const box = Budget.$(id);
+      if (!box) continue;
+      box.replaceChildren();
+      list.forEach((r) => {
+        const div = document.createElement('div'); div.className = 'banner';
+        const p = document.createElement('p'); p.textContent = r.text;
+        div.appendChild(p);
+        if (r.id === 'backup' && typeof Sync !== 'undefined') {
+          const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'btn btn-small btn-primary'; btn.textContent = 'Sauvegarder';
+          btn.addEventListener('click', () => Sync.exportEncrypted());
+          div.appendChild(btn);
+        }
+        box.appendChild(div);
+      });
+    }
   },
 
   /* ---------- Import CSV ---------- */
@@ -755,7 +1079,7 @@ const Budget = {
     box.replaceChildren();
     transactions.slice(0, 5).forEach((t) => {
       const row = document.createElement('div'); row.className = 'tx-top';
-      const l = document.createElement('span'); l.className = 'tx-label'; l.textContent = `${Fmt.date(t.date)} · ${t.label}`;
+      const l = document.createElement('span'); l.className = 'tx-label'; l.textContent = `${Fmt.date(t.date)} · ${BudgetCore.displayLabel(t.label)}`;
       const a = document.createElement('b'); a.className = Fmt.trend(t.amount); a.textContent = Fmt.signedEur(t.amount);
       row.append(l, a); box.appendChild(row);
     });
@@ -771,6 +1095,7 @@ const Budget = {
       category: BudgetCore.categorize(t, rules), manual: false,
     }));
     Budget.state.transactions.push(...added);
+    Budget.state.lastImport = Dates.today();
     Budget.persist();
     Budget.$('csv-dialog').close();
     const months = BudgetCore.monthsOf(added);
@@ -848,6 +1173,14 @@ const Budget = {
     const cash = accounts.reduce((s, a) => s + a.balance, 0);
     const total = cash + pf.value;
     Budget.$('p-total').textContent = Fmt.eur(total);
+
+    // Historique : total du mois enregistré (une seule ligne par mois, mise à jour si elle change)
+    if (accounts.length || pf.value) {
+      const { history, changed } = BudgetCore.upsertSnapshot(Budget.state.history, BudgetCore.monthOf(Dates.today()), { cash, pea: pf.value });
+      if (changed) { Budget.state.history = history; Budget.persist(); }
+    }
+    Budget.renderHistory();
+    Budget.renderReminders();
     Budget.$('p-cash').textContent = Fmt.eur(cash);
     Budget.$('p-pea').textContent = Fmt.eur(pf.value);
     const pvEl = Budget.$('p-pea-pv');
@@ -902,6 +1235,45 @@ const Budget = {
     let canImport = false;
     try { canImport = !App.state.purchases.length && !!localStorage.getItem('suivi-pea:v1'); } catch (e) { /* stockage inaccessible */ }
     Budget.$('p-import-old').hidden = !canImport;
+  },
+
+  /** Courbe du patrimoine total, un point par mois. */
+  renderHistory() {
+    const el = Budget.$('p-history');
+    if (!el) return;
+    const h = Budget.state.history;
+    const hint = Budget.$('p-history-hint');
+    el.innerHTML = '';
+    el.hidden = h.length < 2;
+    if (h.length < 2) {
+      hint.textContent = h.length
+        ? `La courbe se construit mois après mois : premier point en ${Budget.monthLabel(h[0].month)} (${Fmt.eur0(h[0].total)}). Le total du mois est enregistré à chaque ouverture.`
+        : 'Ajoutez vos comptes : le total sera enregistré chaque mois pour tracer la courbe.';
+      return;
+    }
+    const first = h[0]; const last = h[h.length - 1];
+    const diff = last.total - first.total;
+    hint.textContent = `Depuis ${Budget.monthLabel(first.month)} : ${diff >= 0 ? '+' : '−'}${Fmt.eur0(Math.abs(diff))} (comptes ${Fmt.eur0(last.cash)}, PEA ${Fmt.eur0(last.pea)}).`;
+    const W = el.clientWidth || 320; const H = el.clientHeight || 150;
+    const m = { top: 12, right: 10, bottom: 22, left: 10 };
+    const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none' }, el);
+    const vals = h.map((x) => x.total);
+    let lo = Math.min(...vals); let hi = Math.max(...vals);
+    if (hi === lo) { hi += 1; lo -= 1; }
+    const sx = (i) => m.left + (i / (h.length - 1)) * (W - m.left - m.right);
+    const sy = (v) => m.top + (1 - (v - lo) / (hi - lo)) * (H - m.top - m.bottom);
+    const pts = h.map((x, i) => `${sx(i)},${sy(x.total)}`).join(' ');
+    svgEl('polyline', { points: pts, fill: 'none', style: 'stroke: var(--series-value); stroke-width: 2' }, svg);
+    h.forEach((x, i) => {
+      const dot = svgEl('circle', { cx: sx(i), cy: sy(x.total), r: 3, style: 'fill: var(--series-value)' }, svg);
+      const tip = svgEl('title', {}, dot); tip.textContent = `${Budget.monthLabel(x.month)} : ${Fmt.eur0(x.total)}`;
+    });
+    const tick = (i, anchor) => {
+      const t = svgEl('text', { x: sx(i), y: H - 6, 'text-anchor': anchor, class: 'tick' }, svg);
+      t.textContent = new Date(+h[i].month.slice(0, 4), +h[i].month.slice(5) - 1, 1).toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' });
+    };
+    tick(0, 'start'); tick(h.length - 1, 'end');
+    svgEl('line', { x1: m.left, x2: W - m.right, y1: H - m.bottom, y2: H - m.bottom, class: 'baseline' }, svg);
   },
 
   addAccount(ev) {

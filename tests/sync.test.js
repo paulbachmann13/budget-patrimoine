@@ -116,3 +116,10 @@ test('synchro : jamais la clé service_role dans le code public', () => {
   }
   assert.ok(!/service_role"?\s*[:=]\s*['"]ey/.test(src));
 });
+
+test('fusion : historique du patrimoine par mois', () => {
+  const base = { budget: { history: [{ month: '2026-09', total: 1 }] }, pea: {} };
+  const local = { budget: { history: [{ month: '2026-09', total: 1 }, { month: '2026-10', total: 5 }] }, pea: {} };
+  const remote = { budget: { history: [{ month: '2026-09', total: 2 }] }, pea: {} };
+  assert.deepEqual(M.merge(base, local, remote).budget.history, [{ month: '2026-09', total: 2 }, { month: '2026-10', total: 5 }]);
+});

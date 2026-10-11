@@ -134,6 +134,7 @@ const SyncCore = (() => {
   const byId = (x) => String(x && x.id);
   const BUDGET_SPECS = {
     transactions: byId, accounts: byId,
+    history: (x) => x.month,
     rules: (x) => `${String(x.match).toLowerCase()}|${x.sign || ''}`,
     categories: (x) => x.name,
   };
@@ -450,6 +451,9 @@ const Sync = {
     try {
       const env = await SyncCrypto.makeEnvelope(p, Sync.snapshot());
       Budget.download(`budget-patrimoine-chiffre-${Dates.today()}.json`, JSON.stringify(env));
+      Budget.state.lastEncryptedExport = Dates.today(); // pour le rappel de sauvegarde
+      Budget.persist();
+      Budget.renderReminders();
       Budget.toast('Sauvegarde chiffrée exportée');
     } catch (e) { alert('Export impossible : ' + e.message); }
   },
