@@ -160,8 +160,10 @@ h2 { font-size: 18px; margin: 28px 0 8px; }
 
 /* ---------- Formulaires ---------- */
 .form label { display: block; color: var(--ink-2); font-size: 14px; }
-.form label + label, .form .row + label, .form label + .row, .form datalist + .row { margin-top: 12px; }
-input[type="text"], input[type="date"] {
+.form label + label, .form .row + label, .form label + .row, .form datalist + .row, .form label + div > label { margin-top: 12px; }
+.form .btn[type="submit"] { margin-top: 16px; }
+#sync-unconfigured + .form, #sync-unlock { margin-top: 12px; }
+input[type="text"], input[type="date"], input[type="email"], input[type="password"] {
   display: block;
   width: 100%;
   min-height: var(--tap);

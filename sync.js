@@ -391,7 +391,11 @@ const Sync = {
         ? 'Saisissez votre phrase de chiffrement pour déverrouiller les données.'
         : 'Première connexion : choisissez une phrase de chiffrement (longue, différente du mot de passe). Sans elle, les données synchronisées sont perdues.';
       Sync.render();
-    } catch (e) { Sync.showError('sync-login-error', 'Connexion impossible : ' + e.message); }
+    } catch (e) {
+      const msg = /invalid login credentials/i.test(e.message) ? 'e-mail ou mot de passe incorrect (ceux du compte créé dans Supabase).'
+        : /email not confirmed/i.test(e.message) ? 'e-mail non confirmé (cochez « Auto Confirm User » dans Supabase).' : e.message;
+      Sync.showError('sync-login-error', 'Connexion impossible : ' + msg);
+    }
   },
 
   async onUnlock(ev) {
