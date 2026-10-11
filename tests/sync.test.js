@@ -123,3 +123,32 @@ test('fusion : historique du patrimoine par mois', () => {
   const remote = { budget: { history: [{ month: '2026-09', total: 2 }] }, pea: {} };
   assert.deepEqual(M.merge(base, local, remote).budget.history, [{ month: '2026-09', total: 2 }, { month: '2026-10', total: 5 }]);
 });
+
+/* ---------- Une suppression ne doit pas être annulée par une simple différence de représentation ---------- */
+const { BudgetStore } = require('../budget.js');
+const normalize = (d) => ({ budget: BudgetStore.clean(d.budget).state, pea: Store.clean(d.pea).state });
+const { Store } = require('../app.js');
+
+test('fusion : suppression conservée même si les appareils n\'ont pas la même représentation (ancienne version)', () => {
+  // Bien créé par une ancienne version de l'appli : pas de champ « depreciation »
+  const oldCar = { id: 'car', name: 'Voiture', kind: 'vehicule', value: 16000, date: '2026-10-11' };
+  const empty = { transactions: [], rules: [], accounts: [], categories: [], history: [] };
+  const pea = { purchases: [], deposits: [] };
+  const base = { budget: { ...empty, assets: [oldCar] }, pea };            // dernière synchro (représentation ancienne)
+  const remote = { budget: { ...empty, assets: [oldCar] }, pea };          // le serveur a toujours la voiture
+  const local = { budget: { ...empty, assets: [] }, pea };                 // l'utilisateur vient de la supprimer
+  // Sans normalisation : tout va bien tant que base et serveur sont identiques
+  assert.deepEqual(M.merge(base, local, remote).budget.assets, []);
+  // L'AUTRE appareil (a mis à jour : sa copie contient maintenant depreciation: 0) n'a pas encore vu la suppression
+  const otherLocal = { budget: { ...empty, assets: [{ ...oldCar, depreciation: 0 }] }, pea };
+  const serverAfterDelete = { budget: { ...empty, assets: [] }, pea };
+  const bug = M.merge(base, otherLocal, serverAfterDelete);
+  assert.equal(bug.budget.assets.length, 1, 'sans normalisation : la voiture est « modifiée localement » et revient (bug d\'origine)');
+  // Avec normalisation : la copie locale et la base sont comparées sur la même représentation
+  assert.deepEqual(M.merge(base, otherLocal, serverAfterDelete, normalize).budget.assets, [], 'la suppression est bien propagée');
+  // Une vraie modification reste prioritaire sur une suppression
+  const edited = { budget: { ...empty, assets: [{ ...oldCar, depreciation: 0, value: 15000 }] }, pea };
+  assert.deepEqual(M.merge(base, edited, serverAfterDelete, normalize).budget.assets.map((a) => a.value), [15000]);
+  // Et la suppression locale gagne contre une copie distante inchangée (ancienne représentation)
+  assert.deepEqual(M.merge(base, local, remote, normalize).budget.assets, []);
+});

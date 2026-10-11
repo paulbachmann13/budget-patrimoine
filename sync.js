@@ -141,10 +141,16 @@ const SyncCore = (() => {
   };
   const PEA_SPECS = { purchases: byId, deposits: byId, sales: byId, moves: byId };
 
-  /** Données complètes : { budget, pea }. base = dernière version synchronisée (ou null). */
-  function merge(base, local, remote) {
+  /**
+   * Données complètes : { budget, pea }. base = dernière version synchronisée (ou null).
+   * normalize (facultatif) ramène les trois copies à la même forme avant de les comparer : sans cela,
+   * un champ ajouté par une mise à jour de l'appli ou un ordre de clés différent fait croire qu'un élément
+   * a été « modifié » et une suppression faite sur un autre appareil est annulée.
+   */
+  function merge(base, local, remote, normalize) {
     if (!remote) return local;
     if (!local) return remote;
+    if (normalize) { base = base ? normalize(base) : base; local = normalize(local); remote = normalize(remote); }
     const b = base || {};
     return {
       budget: mergeObject(b.budget, local.budget, remote.budget, BUDGET_SPECS),
@@ -289,6 +295,9 @@ const Sync = {
   /* ---------- Données locales ---------- */
   snapshot() { return { budget: Budget.state, pea: App.state }; },
 
+  /** Même forme pour toutes les copies (appareil, serveur, dernière synchro) : celle de l'appli à jour. */
+  normalize(data) { return { budget: BudgetStore.clean(data.budget).state, pea: Store.clean(data.pea).state }; },
+
   applyLocal(data) {
     Budget.state = BudgetStore.clean(data.budget).state;
     App.state = Store.clean(data.pea).state;
@@ -322,11 +331,11 @@ const Sync = {
       for (let attempt = 0; attempt < 3; attempt++) {
         const row = await Sync.fetchVault();
         const base = Sync.readJSON(Sync.BASE_KEY);
-        const local = Sync.snapshot();
+        const local = Sync.normalize(Sync.snapshot());
         let merged = local; let rev = 0;
         if (row) {
-          const remote = await SyncCrypto.decrypt(Sync.key, row);
-          merged = SyncCore.merge(base, local, remote);
+          const remote = Sync.normalize(await SyncCrypto.decrypt(Sync.key, row));
+          merged = SyncCore.merge(base, local, remote, Sync.normalize);
           rev = Number(row.rev);
           if (!SyncCore.same(merged, local)) Sync.applyLocal(merged);
           if (SyncCore.same(merged, remote)) { Sync.done(merged, rev); break; }
