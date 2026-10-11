@@ -542,6 +542,197 @@ const BudgetCore = (() => {
     return { history: list.slice(-240), changed };
   }
 
+  /* ---------- Abonnements et opérations récurrentes ---------- */
+
+  const median = (xs) => {
+    const s = [...xs].sort((a, b) => a - b); const n = s.length;
+    return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : 0;
+  };
+  const round2 = (v) => Math.round(v * 100) / 100;
+
+  /** Date 'AAAA-MM-JJ' + n jours. */
+  function addDays(iso, n) {
+    return new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10) + n)).toISOString().slice(0, 10);
+  }
+
+  /** Date + n mois, même jour (ramené au dernier jour du mois si besoin : 31/01 + 1 mois → 28/02). */
+  function addMonths(iso, n) {
+    const y = +iso.slice(0, 4); const m = +iso.slice(5, 7) - 1 + n; const d = +iso.slice(8, 10);
+    const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(y, m, Math.min(d, last))).toISOString().slice(0, 10);
+  }
+
+  /** Dernier jour du mois 'AAAA-MM' → 'AAAA-MM-JJ'. */
+  function endOfMonth(month) {
+    const [y, m] = month.split('-').map(Number);
+    return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+  }
+
+  /** Clé de regroupement d'un commerçant : libellé court, sans chiffres ni ponctuation. */
+  function merchantKey(label) {
+    return normLabel(displayLabel(label)).replace(/[0-9]+/g, ' ').replace(/[^a-z&+ ]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  const PERIODS = [
+    { id: 'mois', label: '/ mois', min: 25, max: 37, perYear: 12, minCount: 3 },
+    { id: 'an', label: '/ an', min: 350, max: 380, perYear: 1, minCount: 2 },
+  ];
+
+  /**
+   * Opérations qui reviennent à intervalle régulier pour un montant proche (±15 %) :
+   * abonnements, prélèvements (sign 'out'), salaire, virements réguliers (sign 'in').
+   * Exclus : hors totaux, virements émis et retraits (côté dépenses), remboursements entre amis.
+   */
+  function recurring(transactions, categories, today, sign = 'out') {
+    const groups = new Map();
+    for (const t of transactions) {
+      if (sign === 'out' ? !(t.amount < 0) : !(t.amount > 0)) continue;
+      const kind = t.category === UNCATEGORIZED ? (t.amount > 0 ? 'revenu' : 'depense') : kindOf(t.category, categories);
+      if (kind === NEUTRAL || (sign === 'out' && kind !== 'depense')) continue;
+      if (sign === 'out' && /^(retrait|virement emis)/.test(normLabel(t.label))) continue;
+      const key = merchantKey(t.label);
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(t);
+    }
+    // Périodicité d'une suite d'opérations (dates croissantes), ou null
+    // Un prélèvement est presque toujours récurrent : 2 occurrences suffisent (3 sinon)
+    const periodOf = (items) => {
+      if (items.length < 2) return null;
+      const gaps = items.slice(1).map((t, i) => daysBetween(items[i].date, t.date));
+      const med = median(gaps);
+      const debit = items.every((t) => /^prelevement/.test(normLabel(t.label)));
+      const period = PERIODS.find((p) => med >= p.min && med <= p.max && items.length >= (debit ? 2 : p.minCount));
+      if (!period) return null;
+      const regular = gaps.filter((g) => g >= period.min * 0.8 && g <= period.max * 1.3).length;
+      return regular >= gaps.length * 0.7 ? { period, med } : null;
+    };
+    const out = [];
+    for (const [key, list] of groups) {
+      list.sort((a, b) => a.date.localeCompare(b.date));
+      // 1) Tout le commerçant forme-t-il une suite régulière ? (même si le prix a fortement changé)
+      // 2) Sinon, montants proches regroupés (±15 %) : plusieurs abonnements chez le même commerçant
+      let series;
+      if (periodOf(list)) series = [list];
+      else {
+        const clusters = [];
+        for (const t of list) {
+          const a = Math.abs(t.amount);
+          const c = clusters.find((x) => Math.abs(a - x.ref) <= Math.max(1, x.ref * 0.15));
+          if (c) { c.items.push(t); c.ref = a; } else clusters.push({ ref: a, items: [t] });
+        }
+        series = clusters.map((c) => c.items);
+      }
+      for (const items of series) {
+        const found = periodOf(items);
+        if (!found) continue;
+        const { period, med } = found;
+        const last = items[items.length - 1]; const prev = items[items.length - 2];
+        const amount = Math.abs(last.amount); const before = Math.abs(prev.amount);
+        const change = Math.abs(before - amount) > Math.max(0.01, amount * 0.01) ? { from: before, to: amount, date: last.date } : null;
+        out.push({
+          key, label: displayLabel(last.label), category: last.category,
+          period: period.id, periodLabel: period.label,
+          amount, monthly: round2((amount * period.perYear) / 12), yearly: round2(amount * period.perYear),
+          count: items.length, first: items[0].date, last: last.date,
+          next: addMonths(last.date, period.id === 'an' ? 12 : 1),
+          active: daysBetween(last.date, today) <= med * 1.5 + 5,
+          isNew: daysBetween(items[0].date, today) <= period.max * 3 + 5,
+          change, recentChange: !!change && daysBetween(last.date, today) <= 45,
+        });
+      }
+    }
+    return out.sort((a, b) => b.monthly - a.monthly || a.label.localeCompare(b.label));
+  }
+
+  /** Abonnements et dépenses récurrentes, avec le total mensuel et annuel de ceux en cours. */
+  function subscriptions(transactions, categories, today) {
+    const items = recurring(transactions, categories, today, 'out');
+    const active = items.filter((s) => s.active);
+    return {
+      active, ended: items.filter((s) => !s.active),
+      monthly: round2(active.reduce((s, x) => s + x.monthly, 0)),
+      yearly: round2(active.reduce((s, x) => s + x.yearly, 0)),
+      alerts: active.filter((s) => s.isNew || s.recentChange),
+    };
+  }
+
+  /* ---------- Prévision de fin de mois ---------- */
+
+  /**
+   * Solde estimé du mois en cours au dernier jour :
+   *   déjà passé + revenus réguliers attendus − prélèvements réguliers attendus
+   *   − dépenses courantes (moyenne par jour des 3 mois précédents, hors récurrent) × jours restants.
+   */
+  function forecastMonth(transactions, categories, today) {
+    const month = monthOf(today);
+    const end = endOfMonth(month);
+    const sum = summarizeMonth(transactions, month, categories);
+    const remainingDays = Math.max(0, daysBetween(today, end));
+    const pending = (r) => r.active && r.period === 'mois' && r.last < `${month}-01` && r.next <= end;
+    const outR = recurring(transactions, categories, today, 'out');
+    const inR = recurring(transactions, categories, today, 'in');
+    const remainingOut = outR.filter(pending).map((r) => ({ label: r.label, amount: r.amount, date: r.next < today ? today : r.next }));
+    const remainingIn = inR.filter(pending).map((r) => ({ label: r.label, amount: r.amount, date: r.next < today ? today : r.next }));
+    // Dépenses courantes : médiane des 3 mois complets précédents, sans les opérations
+    // récurrentes ni les grosses dépenses ponctuelles (> BIG €), rapportée aux jours restants
+    const BIG = 250;
+    const prev = lastMonths(month, 4).slice(0, 3);
+    const known = new Set(monthsOf(transactions));
+    const base = prev.filter((m) => known.has(m));
+    const recurringKeys = new Set(outR.map((r) => r.key));
+    let variable = null;
+    if (base.length) {
+      const perMonth = base.map((m) => transactions
+        .filter((t) => monthOf(t.date) === m && t.amount < 0 && -t.amount <= BIG && !recurringKeys.has(merchantKey(t.label)))
+        .filter((t) => (t.category === UNCATEGORIZED ? 'depense' : kindOf(t.category, categories)) === 'depense')
+        .reduce((s, t) => s - t.amount, 0));
+      variable = round2((median(perMonth) / 30.44) * remainingDays);
+    }
+    const sumOut = remainingOut.reduce((s, r) => s + r.amount, 0);
+    const sumIn = remainingIn.reduce((s, r) => s + r.amount, 0);
+    return {
+      month, end, remainingDays,
+      sofar: { income: sum.income, expense: sum.expense, net: sum.net },
+      remainingOut, remainingIn, variable, basisMonths: base.length,
+      projectedNet: round2(sum.net + sumIn - sumOut - (variable || 0)),
+    };
+  }
+
+  /* ---------- Récap du mois ---------- */
+
+  /** Tout ce qu'il faut pour faire le point sur un mois en 30 secondes. */
+  function monthRecap(state, month, today) {
+    const tx = state.transactions || []; const cats = state.categories || [];
+    const cur = summarizeMonth(tx, month, cats);
+    const prevMonth = lastMonths(month, 2)[0];
+    const known = new Set(monthsOf(tx));
+    const prev = known.has(prevMonth) ? summarizeMonth(tx, prevMonth, cats) : null;
+    const before = lastMonths(month, 4).slice(0, 3).filter((m) => known.has(m));
+    const avg = (name) => (before.length ? before.reduce((s, m) => s + spentIn(tx, name, [m]), 0) / before.length : null);
+    const top = cur.spending.slice(0, 5).map((c) => {
+      const a = avg(c.name);
+      return { name: c.name, amount: c.amount, average: a === null ? null : round2(a), delta: a === null ? null : round2(c.amount - a) };
+    });
+    const budgets = budgetStatus(tx, month, state.budgets || {});
+    const biggest = tx.filter((t) => monthOf(t.date) === month && t.amount < 0 && kindOf(t.category, cats) === 'depense')
+      .sort((a, b) => a.amount - b.amount).slice(0, 3)
+      .map((t) => ({ label: displayLabel(t.label), amount: -t.amount, date: t.date, category: t.category }));
+    const subs = subscriptions(tx, cats, today || endOfMonth(month));
+    const h = (state.history || []);
+    const hCur = h.find((x) => x.month === month); const hPrev = h.find((x) => x.month === prevMonth);
+    return {
+      month, prevMonth, summary: cur,
+      versus: prev ? { income: round2(cur.income - prev.income), expense: round2(cur.expense - prev.expense), net: round2(cur.net - prev.net) } : null,
+      top, budgets: { ok: budgets.filter((b) => b.level !== 'over').length, over: budgets.filter((b) => b.level === 'over') },
+      biggest,
+      subscriptions: { monthly: subs.monthly, count: subs.active.length },
+      patrimoine: hCur ? { total: hCur.total, delta: hPrev ? round2(hCur.total - hPrev.total) : null } : null,
+      uncategorized: tx.filter((t) => monthOf(t.date) === month && t.category === UNCATEGORIZED).length,
+      count: tx.filter((t) => monthOf(t.date) === month).length,
+    };
+  }
+
   /* ---------- Rappels ---------- */
 
   /**
@@ -607,6 +798,7 @@ const BudgetCore = (() => {
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
     lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, BANKS, bankOptions, groupAccounts, upsertSnapshot, reminders,
+    addDays, addMonths, endOfMonth, merchantKey, recurring, subscriptions, forecastMonth, monthRecap,
   };
 })();
 
@@ -776,7 +968,8 @@ const Budget = {
       Budget.toast(`${n} transaction(s) recatégorisée(s)`);
     });
     Budget.$('account-form').addEventListener('submit', Budget.addAccount);
-    Budget.$('btn-import-old-pea').addEventListener('click', Budget.importOldPea);
+    Budget.$('btn-recap').addEventListener('click', () => Budget.openRecap(Budget.month));
+    Budget.$('recap-close').addEventListener('click', () => Budget.$('recap-dialog').close());
   },
 
   toast(msg) { if (typeof App !== 'undefined') App.toast(msg); },
@@ -853,11 +1046,103 @@ const Budget = {
     Budget.$('b-categories-hint').hidden = !sum.spending.length || !!Budget.catFilter;
     Budget.$('btn-clear-filter').hidden = !Budget.catFilter;
 
+    Budget.renderForecast();
     Budget.renderBars();
     Budget.renderBudgets();
+    Budget.renderSubscriptions();
     Budget.renderTrend();
     Budget.renderList();
     Budget.renderPatrimoine();
+  },
+
+  /** Fin de mois estimée (mois en cours seulement). */
+  renderForecast() {
+    const box = Budget.$('b-forecast');
+    const today = Dates.today();
+    box.hidden = Budget.month !== BudgetCore.monthOf(today);
+    if (box.hidden) return;
+    const f = BudgetCore.forecastMonth(Budget.state.transactions, Budget.state.categories, today);
+    const v = Budget.$('b-forecast-value');
+    v.textContent = Fmt.signedEur(f.projectedNet);
+    v.className = Fmt.trend(f.projectedNet);
+    const parts = [`aujourd'hui ${Fmt.signedEur(f.sofar.net)}`];
+    if (f.remainingIn.length) parts.push(`+${Fmt.eur(f.remainingIn.reduce((s, r) => s + r.amount, 0))} attendus (${f.remainingIn.map((r) => r.label).join(', ')})`);
+    if (f.remainingOut.length) parts.push(`−${Fmt.eur(f.remainingOut.reduce((s, r) => s + r.amount, 0))} de prélèvements (${f.remainingOut.map((r) => r.label).join(', ')})`);
+    if (f.variable !== null) parts.push(`−${Fmt.eur(f.variable)} de dépenses courantes sur ${f.remainingDays} jour${f.remainingDays > 1 ? 's' : ''} (rythme habituel, hors grosses dépenses)`);
+    Budget.$('b-forecast-detail').textContent = parts.join(' · ') + '.';
+  },
+
+  /** Abonnements et prélèvements réguliers repérés dans tout l'historique. */
+  renderSubscriptions() {
+    const s = BudgetCore.subscriptions(Budget.state.transactions, Budget.state.categories, Dates.today());
+    Budget.$('b-subs-total').textContent = s.active.length ? `${Fmt.eur(s.monthly)} / mois · ${Fmt.eur0(s.yearly)} / an` : '—';
+    const alert = Budget.$('b-subs-alert');
+    alert.hidden = !s.alerts.length;
+    alert.textContent = s.alerts.map((a) => (a.recentChange
+      ? `⚠︎ ${a.label} : prix passé de ${Fmt.eur(a.change.from)} à ${Fmt.eur(a.change.to)}`
+      : `Nouveau : ${a.label} (${Fmt.eur(a.amount)} ${a.periodLabel})`)).join(' · ');
+    const row = (x, ended) => {
+      const div = document.createElement('div'); div.className = 'sub-row';
+      const top = document.createElement('div'); top.className = 'tx-top';
+      const l = document.createElement('span'); l.className = 'tx-label'; l.textContent = x.label;
+      const a = document.createElement('b'); a.textContent = `${Fmt.eur(x.amount)} ${x.periodLabel}`;
+      top.append(l, a);
+      const meta = document.createElement('p'); meta.className = 'hint';
+      meta.textContent = ended
+        ? `dernier paiement le ${Fmt.date(x.last)} · ${x.count} paiements`
+        : `${x.category} · prochain vers le ${Fmt.date(x.next)}` + (x.period === 'mois' ? ` · ${Fmt.eur0(x.yearly)} / an` : '') + (x.change ? ` · avant ${Fmt.eur(x.change.from)}` : '');
+      div.append(top, meta);
+      return div;
+    };
+    Budget.$('b-subs').replaceChildren(...s.active.map((x) => row(x, false)));
+    Budget.$('b-subs-empty').hidden = s.active.length > 0;
+    Budget.$('b-subs-ended-box').hidden = !s.ended.length;
+    Budget.$('b-subs-ended').replaceChildren(...s.ended.map((x) => row(x, true)));
+  },
+
+  /** Récap d'un mois : tout l'essentiel en une page. */
+  openRecap(month) {
+    const r = BudgetCore.monthRecap(Budget.state, month, Dates.today());
+    Budget.$('recap-title').textContent = `Mon mois · ${Budget.monthLabel(month)}`;
+    const body = Budget.$('recap-body');
+    body.replaceChildren();
+    const section = (title) => { const h = document.createElement('p'); h.className = 'label recap-title'; h.textContent = title; body.appendChild(h); };
+    const line = (left, right, cls = '') => {
+      const d = document.createElement('div'); d.className = 'tx-top';
+      const l = document.createElement('span'); l.textContent = left;
+      const b = document.createElement('b'); b.textContent = right; if (cls) b.className = cls;
+      d.append(l, b); body.appendChild(d);
+    };
+    const note = (text) => { const p = document.createElement('p'); p.className = 'hint'; p.textContent = text; body.appendChild(p); };
+    const vs = (v) => (Math.abs(v) < 1 ? '' : ` (${v >= 0 ? '+' : '−'}${Fmt.eur0(Math.abs(v))} vs mois d'avant)`);
+    const s = r.summary;
+    section('En bref');
+    line('Revenus', Fmt.eur(s.income) + (r.versus ? vs(r.versus.income) : ''), 'pos');
+    if (s.aid) note(`dont revenus propres ${Fmt.eur(s.ownIncome)} et aide reçue ${Fmt.eur(s.aid)}`);
+    line('Dépenses', Fmt.eur(s.expense) + (r.versus ? vs(r.versus.expense) : ''));
+    line('Solde', Fmt.signedEur(s.net), Fmt.trend(s.net));
+    line("Taux d'épargne", s.savingsRate === null ? '—' : Fmt.pct(s.savingsRate));
+    if (r.top.length) {
+      section("Où est parti l'argent");
+      r.top.forEach((c) => line(c.name, Fmt.eur(c.amount) + (c.delta === null || Math.abs(c.delta) < 1 ? '' : ` · ${c.delta >= 0 ? '+' : '−'}${Fmt.eur0(Math.abs(c.delta))} vs moyenne`),
+        c.delta > 0 && c.average > 0 && c.delta / c.average > 0.25 ? 'neg' : ''));
+    }
+    if (r.biggest.length) {
+      section('Plus grosses dépenses');
+      r.biggest.forEach((b) => line(`${Fmt.date(b.date).slice(0, 5)} · ${b.label}`, Fmt.eur(b.amount)));
+    }
+    section('Plafonds');
+    note(r.budgets.over.length
+      ? `${r.budgets.over.length} dépassé${r.budgets.over.length > 1 ? 's' : ''} : ${r.budgets.over.map((b) => `${b.name} (+${Fmt.eur0(b.spent - b.limit)})`).join(', ')}. ${r.budgets.ok} tenu${r.budgets.ok > 1 ? 's' : ''}.`
+      : (r.budgets.ok ? `Tous tenus (${r.budgets.ok}) 👍` : 'Aucun plafond défini.'));
+    section('Abonnements');
+    note(r.subscriptions.count ? `${r.subscriptions.count} en cours · ${Fmt.eur(r.subscriptions.monthly)} / mois` : 'Aucun repéré.');
+    if (r.patrimoine) {
+      section('Patrimoine');
+      line('Fin du mois', Fmt.eur0(r.patrimoine.total) + (r.patrimoine.delta === null ? '' : ` (${r.patrimoine.delta >= 0 ? '+' : '−'}${Fmt.eur0(Math.abs(r.patrimoine.delta))})`));
+    }
+    note(`${r.count} transaction${r.count > 1 ? 's' : ''}` + (r.uncategorized ? ` · ${r.uncategorized} à catégoriser` : ''));
+    Budget.$('recap-dialog').showModal();
   },
 
   /** Plafonds du mois affiché : jauge par catégorie, alerte si dépassement. */
@@ -1334,11 +1619,6 @@ const Budget = {
     });
     Budget.$('p-accounts-empty').hidden = accounts.length > 0 || peaRow.length > 0;
     Budget.renderBankList();
-
-    // Reprise des données du Suivi PEA d'origine (même navigateur) si la copie est vide
-    let canImport = false;
-    try { canImport = !App.state.purchases.length && !!localStorage.getItem('suivi-pea:v1'); } catch (e) { /* stockage inaccessible */ }
-    Budget.$('p-import-old').hidden = !canImport;
   },
 
   /** Menu des banques du formulaire d'ajout (garde le choix en cours). */
@@ -1536,17 +1816,6 @@ const Budget = {
     Budget.state.accounts.push({ id: BudgetStore.newId(), name: name.slice(0, 60), bank, balance, date: Dates.today(), blocked, until: '' });
     form.reset();
     Budget.persist(); Budget.renderPatrimoine();
-  },
-
-  /** Copie (lecture seule) des achats du Suivi PEA d'origine : l'original n'est jamais modifié. */
-  importOldPea() {
-    try {
-      const raw = localStorage.getItem('suivi-pea:v1');
-      if (!raw) throw new Error('Aucune donnée du Suivi PEA d\'origine dans ce navigateur.');
-      const state = Store.sanitize(JSON.parse(raw));
-      App.state = state; App.persist(); App.renderAll();
-      Budget.toast(`${state.purchases.length} achat(s) repris du Suivi PEA d'origine`);
-    } catch (err) { alert('Reprise impossible : ' + err.message); }
   },
 };
 

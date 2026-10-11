@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.7.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.8.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -1308,6 +1308,7 @@ const App = {
     Budget.init();
     App.renderAll();
     if (typeof Sync !== 'undefined') Sync.init();
+    if (typeof Lock !== 'undefined') Lock.init();
     window.addEventListener('resize', App.debounce(() => { App.renderCharts(); }, 150));
 
     // Cours automatiques : au démarrage puis à chaque retour dans l'appli (au plus 1 fois / 30 min)

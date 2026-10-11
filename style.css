@@ -501,3 +501,45 @@ input[type="search"]:focus { outline: 2px solid var(--accent); outline-offset: 1
 .bank-head b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .account-name { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0; font: inherit; color: inherit; overflow-wrap: anywhere; cursor: pointer; }
 .account-auto { font-variant-numeric: tabular-nums; padding-right: 42px; }
+
+/* ---------- Abonnements, prévision, récap (v2.8) ---------- */
+.forecast { margin-top: 12px; }
+.forecast .hint { margin: 6px 0 0; }
+#btn-recap { margin-top: 12px; }
+.subs .sub-row + .sub-row { border-top: 1px solid var(--border); padding-top: 8px; }
+.sub-row .hint { margin: 2px 0 0; font-size: 13px; }
+#b-subs-ended-box { margin-top: 12px; }
+#b-subs-ended-box summary { cursor: pointer; }
+.recap .recap-title { margin-top: 16px; }
+.recap .recap-title:first-child { margin-top: 0; }
+.recap .tx-top { padding: 4px 0; font-size: 15px; }
+.recap .hint { margin: 4px 0 0; }
+
+/* ---------- Verrouillage (v2.8) ---------- */
+html.locked main, html.locked .topbar, html.locked .tabbar,
+html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dialog { visibility: hidden; }
+.lock-screen {
+  position: fixed; inset: 0; z-index: 100; background: var(--page);
+  display: flex; align-items: center; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);
+}
+.lock-screen[hidden] { display: none; }
+.lock-box { width: 100%; max-width: 320px; text-align: center; }
+.lock-icon { font-size: 36px; margin: 0; }
+.lock-box h2 { margin: 8px 0 20px; }
+.lock-dots { display: flex; justify-content: center; gap: 14px; height: 16px; }
+.lock-dots span { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--ink-2); }
+.lock-dots span.on { background: var(--ink); border-color: var(--ink); }
+.lock-dots.shake { animation: lock-shake .35s; }
+@keyframes lock-shake { 25% { transform: translateX(-8px); } 75% { transform: translateX(8px); } }
+.lock-error { min-height: 20px; margin: 12px 0 8px; color: var(--bad); font-size: 14px; }
+.lock-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 8px auto 16px; max-width: 280px; }
+.lock-keys button {
+  aspect-ratio: 1; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--ink); font: inherit; font-size: 26px; cursor: pointer;
+}
+.lock-keys button:active { background: var(--surface); }
+.lock-keys button[hidden] { visibility: hidden; display: block; }
+.lock-keys.disabled { opacity: .4; pointer-events: none; }
+.lock-box .link-btn { display: block; margin: 8px auto 0; }
+.lock-keys button.lock-bio { font-size: 14px; }

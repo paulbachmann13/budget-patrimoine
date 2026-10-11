@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.7.0">
+  <link rel="stylesheet" href="style.css?v=2.8.0">
 </head>
 <body>
   <header class="topbar">
@@ -132,18 +132,46 @@
         <p class="hint">Serveur gratuit : il se met en pause après une semaine sans activité (une tâche automatique le garde éveillé). En cas de pause, relancez-le depuis supabase.com : les données ne sont pas perdues.</p>
       </div>
 
+      <h2>Verrouillage</h2>
+      <div class="card">
+        <p class="hint" style="margin-top:0">Code (et Face ID / Touch ID) demandé à l'ouverture de l'appli sur cet appareil. Réglage propre à chaque appareil.</p>
+        <p class="label" id="lock-status"></p>
+        <div id="lock-off"></div>
+        <form id="lock-form" class="form" autocomplete="off">
+          <div class="row">
+            <label>Code (4 à 6 chiffres)
+              <input name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
+            </label>
+            <label>Confirmer
+              <input name="confirm" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off">
+            </label>
+          </div>
+          <p class="error" id="lock-error" hidden></p>
+          <button type="submit" class="btn btn-primary">Activer le verrouillage</button>
+        </form>
+        <div id="lock-on" class="stack" hidden>
+          <label class="form">Reverrouiller après
+            <select id="lock-delay">
+              <option value="0">Immédiatement</option>
+              <option value="1">1 minute en arrière-plan</option>
+              <option value="5">5 minutes en arrière-plan</option>
+              <option value="15">15 minutes en arrière-plan</option>
+            </select>
+          </label>
+          <button class="btn" id="btn-lock-bio" type="button" hidden>Activer Face ID / Touch ID</button>
+          <button class="btn" id="btn-lock-now" type="button">🔒 Verrouiller maintenant</button>
+          <button class="btn" id="btn-lock-change" type="button">Changer le code</button>
+          <button class="btn btn-danger" id="btn-lock-off" type="button">Désactiver le verrouillage</button>
+        </div>
+        <p class="hint" id="lock-bio-hint"></p>
+      </div>
+
       <h2>Sauvegarde chiffrée</h2>
       <div class="card stack">
         <p class="hint" style="margin-top:0">Tout (budget, comptes, PEA) dans un fichier chiffré par une phrase : à garder dans Fichiers / iCloud Drive en secours.</p>
         <button class="btn" id="btn-export-encrypted" type="button">⬇︎ Exporter une sauvegarde chiffrée</button>
         <label class="btn" for="encrypted-import-file">⬆︎ Importer une sauvegarde chiffrée</label>
         <input type="file" id="encrypted-import-file" class="visually-hidden" accept="application/json,.json,text/plain">
-      </div>
-
-      <div class="card" id="p-import-old" hidden>
-        <p class="label">Reprendre mon Suivi PEA d'origine</p>
-        <p class="hint">Copie les achats de l'appli d'origine (lue sans la modifier) dans cette appli.</p>
-        <button class="btn btn-block" id="btn-import-old-pea" type="button">Reprendre mes achats PEA</button>
       </div>
     </section>
 
@@ -173,6 +201,12 @@
         <p class="hint" id="b-income-split"></p>
         <p class="hint" id="b-neutral"></p>
 
+        <div class="card forecast" id="b-forecast" hidden>
+          <div class="avail-row"><span>Fin de mois estimée</span><b id="b-forecast-value"></b></div>
+          <p class="hint" id="b-forecast-detail"></p>
+        </div>
+        <button class="btn btn-block" id="btn-recap" type="button">📋 Récap du mois</button>
+
         <h2>12 derniers mois</h2>
         <div class="card chart-card">
           <div class="legend"><span><i class="key key-income"></i>Revenus</span><span><i class="key key-expense"></i>Dépenses</span></div>
@@ -185,6 +219,18 @@
           <p class="hint budget-alert" id="b-budget-alert" hidden></p>
           <div id="b-budgets" class="stack"></div>
           <p class="empty" id="b-budgets-empty">Aucun plafond. Fixez-en dans « Catégories et plafonds », plus bas.</p>
+        </div>
+
+        <h2>Abonnements et prélèvements</h2>
+        <div class="card">
+          <div class="avail-row"><span>En cours</span><b id="b-subs-total"></b></div>
+          <p class="hint budget-alert" id="b-subs-alert" hidden></p>
+          <div id="b-subs" class="stack subs"></div>
+          <p class="empty" id="b-subs-empty">Aucun abonnement repéré pour l'instant : il faut 2 prélèvements ou 3 paiements réguliers.</p>
+          <details id="b-subs-ended-box" hidden>
+            <summary class="hint">Terminés</summary>
+            <div id="b-subs-ended" class="stack subs"></div>
+          </details>
         </div>
 
         <h2>Dépenses par catégorie</h2>
@@ -559,6 +605,15 @@
     </div>
   </dialog>
 
+  <!-- Récap du mois -->
+  <dialog id="recap-dialog">
+    <div class="form">
+      <h2 id="recap-title"></h2>
+      <div id="recap-body" class="recap"></div>
+      <button type="button" class="btn btn-block" id="recap-close" style="margin-top:16px">Fermer</button>
+    </div>
+  </dialog>
+
   <!-- Banque d'un compte -->
   <dialog id="bank-dialog">
     <div class="form">
@@ -629,11 +684,29 @@
     <button class="btn btn-small btn-primary" id="btn-reload">Recharger</button>
   </div>
 
+  <div id="lock-screen" class="lock-screen" hidden>
+    <div class="lock-box">
+      <p class="lock-icon" aria-hidden="true">🔒</p>
+      <h2 id="lock-title">Budget &amp; Patrimoine</h2>
+      <div id="lock-dots" class="lock-dots" aria-label="Code saisi"></div>
+      <p class="lock-error" id="lock-error-screen" role="alert"></p>
+      <div id="lock-keys" class="lock-keys">
+        <button type="button" data-k="1">1</button><button type="button" data-k="2">2</button><button type="button" data-k="3">3</button>
+        <button type="button" data-k="4">4</button><button type="button" data-k="5">5</button><button type="button" data-k="6">6</button>
+        <button type="button" data-k="7">7</button><button type="button" data-k="8">8</button><button type="button" data-k="9">9</button>
+        <button type="button" data-k="bio" id="lock-bio" class="lock-bio" aria-label="Face ID / Touch ID">Face ID</button><button type="button" data-k="0">0</button><button type="button" data-k="del" aria-label="Effacer">⌫</button>
+      </div>
+      <button type="button" class="link-btn" id="lock-cancel" hidden>Annuler</button>
+      <button type="button" class="link-btn" id="lock-forgot">Code oublié ?</button>
+    </div>
+  </div>
+
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.7.0"></script>
-  <script src="app.js?v=2.7.0"></script>
-  <script src="sync.js?v=2.7.0"></script>
+  <script src="budget.js?v=2.8.0"></script>
+  <script src="app.js?v=2.8.0"></script>
+  <script src="sync.js?v=2.8.0"></script>
+  <script src="lock.js?v=2.8.0"></script>
 </body>
 </html>
