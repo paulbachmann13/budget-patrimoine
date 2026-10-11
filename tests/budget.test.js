@@ -359,6 +359,19 @@ test('disponibilité : comptes bloqués, date de déblocage, PEA avant / après 
   assert.equal(B.availability([], { amount: 0, until: '2031-06-03' }, '2026-10-11').items.length, 0);
 });
 
+test('comptes groupés par banque, avec total ; sans banque à la fin', () => {
+  const g = B.groupAccounts([
+    { name: 'Livret A', bank: 'Crédit Agricole', balance: 3000 },
+    { name: 'Espèces', bank: '', balance: 50 },
+    { name: 'Compte', bank: 'BforBank', balance: 200.1 },
+    { name: 'Courant', bank: 'crédit agricole ', balance: 850.2 },
+  ]);
+  assert.deepEqual(g.map((x) => [x.bank, x.total, x.accounts.length]), [['BforBank', 200.1, 1], ['Crédit Agricole', 3850.2, 2], ['', 50, 1]]);
+  assert.deepEqual(B.groupAccounts([]), []);
+  const av = B.availability([{ name: 'Livret A', bank: 'Crédit Agricole', balance: 10 }], null, '2026-10-11');
+  assert.equal(av.items[0].name, 'Livret A (Crédit Agricole)');
+});
+
 test('stockage : comptes bloqués conservés', () => {
   const { state } = BudgetStore.clean({ transactions: [], accounts: [
     { name: 'PEL', balance: 5000, blocked: true, until: '2028-01-01' },

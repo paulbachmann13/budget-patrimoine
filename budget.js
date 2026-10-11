@@ -449,7 +449,7 @@ const BudgetCore = (() => {
   function availability(accounts, pea, today) {
     const items = (accounts || []).map((a) => {
       const blocked = !!a.blocked && !(a.until && a.until <= today);
-      return { name: a.name, amount: a.balance, blocked, until: blocked ? a.until || '' : '' };
+      return { name: a.bank ? `${a.name} (${a.bank})` : a.name, amount: a.balance, blocked, until: blocked ? a.until || '' : '' };
     });
     if (pea && pea.amount) {
       const blocked = !!pea.until && pea.until > today;
@@ -464,6 +464,20 @@ const BudgetCore = (() => {
       items: items.sort((a, b) => a.blocked - b.blocked || (a.until || '9').localeCompare(b.until || '9') || b.amount - a.amount),
       nextRelease: dated.length ? { name: dated[0].name, date: dated[0].until, amount: dated[0].amount } : null,
     };
+  }
+
+  /** Comptes regroupés par banque (ordre alphabétique, « sans banque » à la fin), avec le total de chaque banque. */
+  function groupAccounts(accounts) {
+    const groups = new Map();
+    for (const a of accounts || []) {
+      const bank = String(a.bank || '').trim();
+      const key = bank.toLowerCase();
+      if (!groups.has(key)) groups.set(key, { bank, total: 0, accounts: [] });
+      const g = groups.get(key);
+      g.accounts.push(a);
+      g.total = Math.round((g.total + a.balance) * 100) / 100;
+    }
+    return [...groups.values()].sort((a, b) => (!a.bank) - (!b.bank) || a.bank.localeCompare(b.bank, 'fr'));
   }
 
   /* ---------- Historique du patrimoine ---------- */
@@ -545,7 +559,7 @@ const BudgetCore = (() => {
     normLabel, ruleKey, parseDate, parseAmount,
     detectDelimiter, parseCsv, detectColumns, extractTransactions,
     categorize, kindOf, summarizeMonth, monthsOf, fillMonths, dedupe, monthOf,
-    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, upsertSnapshot, reminders,
+    lastMonths, daysBetween, displayLabel, spentIn, budgetStatus, categorySeries, peaTotal, availability, groupAccounts, upsertSnapshot, reminders,
   };
 })();
 
@@ -619,6 +633,7 @@ const BudgetStore = {
       if (!name || !Number.isFinite(balance)) { dropped++; continue; }
       accounts.push({
         id: uid(a.id), name, balance, date: BudgetCore.parseDate(a.date) || '',
+        bank: text(a.bank, 40).trim(),
         blocked: !!a.blocked, until: a.blocked ? BudgetCore.parseDate(a.until) || '' : '', // argent bloqué (PEL, CEL…)
       });
     }
@@ -1257,45 +1272,77 @@ const Budget = {
     // Liste des comptes
     const box = Budget.$('p-accounts');
     box.replaceChildren();
-    accounts.forEach((a) => {
-      const row = document.createElement('div'); row.className = 'account-row';
-      const name = document.createElement('span'); name.textContent = a.name;
-      const bal = document.createElement('input');
-      bal.type = 'text'; bal.inputMode = 'decimal'; bal.value = Fmt.input(a.balance); bal.setAttribute('aria-label', `Solde de ${a.name}`);
-      bal.addEventListener('change', () => {
-        const v = BudgetCore.parseAmount(bal.value);
-        if (Number.isNaN(v)) { bal.value = Fmt.input(a.balance); return; }
-        a.balance = v; a.date = Dates.today(); Budget.persist(); Budget.renderPatrimoine();
-      });
-      const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
-      del.addEventListener('click', () => {
-        if (!confirm(`Supprimer le compte « ${a.name} » ?`)) return;
-        Budget.state.accounts = Budget.state.accounts.filter((x) => x.id !== a.id);
-        Budget.persist(); Budget.renderPatrimoine();
-      });
-      row.append(name, bal, del);
-      box.appendChild(row);
-      // Disponible tout de suite, ou bloqué (avec date de déblocage facultative)
-      const meta = document.createElement('div'); meta.className = 'account-meta';
-      const d = document.createElement('span'); d.className = 'hint'; d.textContent = a.date ? `mis à jour le ${Fmt.date(a.date)}` : '';
-      const sel = document.createElement('select'); sel.setAttribute('aria-label', `Disponibilité de ${a.name}`);
-      [['dispo', 'Disponible'], ['bloque', 'Bloqué']].forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
-      sel.value = a.blocked ? 'bloque' : 'dispo';
-      const until = document.createElement('input'); until.type = 'date'; until.value = a.until || '';
-      until.setAttribute('aria-label', `${a.name} : bloqué jusqu'au (facultatif)`); until.title = 'Bloqué jusqu\'au (facultatif)';
-      until.hidden = !a.blocked;
-      const untilLbl = document.createElement('span'); untilLbl.className = 'until-label'; untilLbl.textContent = 'jusqu\'au'; untilLbl.hidden = !a.blocked;
-      sel.addEventListener('change', () => { a.blocked = sel.value === 'bloque'; if (!a.blocked) a.until = ''; Budget.persist(); Budget.renderPatrimoine(); });
-      until.addEventListener('change', () => { a.until = BudgetCore.parseDate(until.value) || ''; Budget.persist(); Budget.renderPatrimoine(); });
-      meta.append(d, sel, untilLbl, until);
-      box.appendChild(meta);
+    const groups = BudgetCore.groupAccounts(accounts);
+    const showHeads = groups.length > 1 || (groups[0] && groups[0].bank);
+    groups.forEach((g) => {
+      if (showHeads) {
+        const head = document.createElement('div'); head.className = 'bank-head';
+        const n = document.createElement('span'); n.textContent = g.bank || 'Sans banque';
+        const t = document.createElement('b'); t.textContent = Fmt.eur(g.total);
+        head.append(n, t); box.appendChild(head);
+      }
+      g.accounts.forEach((a) => Budget.renderAccount(box, a));
     });
     Budget.$('p-accounts-empty').hidden = accounts.length > 0;
+    Budget.renderBankList();
 
     // Reprise des données du Suivi PEA d'origine (même navigateur) si la copie est vide
     let canImport = false;
     try { canImport = !App.state.purchases.length && !!localStorage.getItem('suivi-pea:v1'); } catch (e) { /* stockage inaccessible */ }
     Budget.$('p-import-old').hidden = !canImport;
+  },
+
+  /** Suggestions de banques : les grandes banques + celles déjà utilisées. */
+  renderBankList() {
+    const list = Budget.$('banks');
+    if (!list) return;
+    const base = ['Crédit Agricole', 'BforBank', 'BoursoBank', 'Banque Populaire', 'BNP Paribas', 'Caisse d\'Épargne', 'Crédit Mutuel', 'LCL', 'La Banque Postale', 'Société Générale', 'Fortuneo', 'Hello bank!', 'Revolut', 'Trade Republic', 'Lydia'];
+    const names = [...new Set([...Budget.state.accounts.map((a) => a.bank).filter(Boolean), ...base])];
+    list.replaceChildren(...names.map((n) => { const o = document.createElement('option'); o.value = n; return o; }));
+  },
+
+  /** Un compte : nom (touche = changer de banque), solde modifiable, disponibilité. */
+  renderAccount(box, a) {
+    const row = document.createElement('div'); row.className = 'account-row';
+    const name = document.createElement('button');
+    name.type = 'button'; name.className = 'account-name';
+    name.textContent = a.name;
+    name.title = 'Changer la banque';
+    name.setAttribute('aria-label', `${a.name} : changer la banque`);
+    name.addEventListener('click', () => {
+      const v = prompt(`Banque de « ${a.name} » (vide = sans banque) :`, a.bank || '');
+      if (v === null) return;
+      a.bank = v.trim().slice(0, 40); Budget.persist(); Budget.renderPatrimoine();
+    });
+    const bal = document.createElement('input');
+    bal.type = 'text'; bal.inputMode = 'decimal'; bal.value = Fmt.input(a.balance); bal.setAttribute('aria-label', `Solde de ${a.name}`);
+    bal.addEventListener('change', () => {
+      const v = BudgetCore.parseAmount(bal.value);
+      if (Number.isNaN(v)) { bal.value = Fmt.input(a.balance); return; }
+      a.balance = v; a.date = Dates.today(); Budget.persist(); Budget.renderPatrimoine();
+    });
+    const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small'; del.textContent = '×'; del.setAttribute('aria-label', `Supprimer ${a.name}`);
+    del.addEventListener('click', () => {
+      if (!confirm(`Supprimer le compte « ${a.name} » ?`)) return;
+      Budget.state.accounts = Budget.state.accounts.filter((x) => x.id !== a.id);
+      Budget.persist(); Budget.renderPatrimoine();
+    });
+    row.append(name, bal, del);
+    box.appendChild(row);
+    // Disponible tout de suite, ou bloqué (avec date de déblocage facultative)
+    const meta = document.createElement('div'); meta.className = 'account-meta';
+    const d = document.createElement('span'); d.className = 'hint'; d.textContent = a.date ? `mis à jour le ${Fmt.date(a.date)}` : '';
+    const sel = document.createElement('select'); sel.setAttribute('aria-label', `Disponibilité de ${a.name}`);
+    [['dispo', 'Disponible'], ['bloque', 'Bloqué']].forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
+    sel.value = a.blocked ? 'bloque' : 'dispo';
+    const until = document.createElement('input'); until.type = 'date'; until.value = a.until || '';
+    until.setAttribute('aria-label', `${a.name} : bloqué jusqu'au (facultatif)`); until.title = 'Bloqué jusqu\'au (facultatif)';
+    until.hidden = !a.blocked;
+    const untilLbl = document.createElement('span'); untilLbl.className = 'until-label'; untilLbl.textContent = 'jusqu\'au'; untilLbl.hidden = !a.blocked;
+    sel.addEventListener('change', () => { a.blocked = sel.value === 'bloque'; if (!a.blocked) a.until = ''; Budget.persist(); Budget.renderPatrimoine(); });
+    until.addEventListener('change', () => { a.until = BudgetCore.parseDate(until.value) || ''; Budget.persist(); Budget.renderPatrimoine(); });
+    meta.append(d, sel, untilLbl, until);
+    box.appendChild(meta);
   },
 
   /** Argent disponible tout de suite / bloqué (PEA avant 5 ans, PEL, CEL…). */
@@ -1382,7 +1429,8 @@ const Budget = {
     if (!name || Number.isNaN(balance)) { err.textContent = 'Nom et solde valide (ex. 1 250,50) requis.'; err.hidden = false; return; }
     err.hidden = true;
     const blocked = form.availability.value === 'bloque';
-    Budget.state.accounts.push({ id: BudgetStore.newId(), name: name.slice(0, 60), balance, date: Dates.today(), blocked, until: '' });
+    const bank = form.bank.value.trim().slice(0, 40);
+    Budget.state.accounts.push({ id: BudgetStore.newId(), name: name.slice(0, 60), bank, balance, date: Dates.today(), blocked, until: '' });
     form.reset();
     Budget.persist(); Budget.renderPatrimoine();
   },
