@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.9.4'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.10.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -318,6 +318,9 @@ const Calc = {
       case 'years': return v >= 0 && v <= 80;
       case 'rate': return v > -100 && v <= 100;
       case 'ter': return v >= 0 && v < 100;
+      case 'growth': return v >= 0 && v <= 20;
+      case 'inflation': return v >= 0 && v <= 20;
+      case 'target': return v > 0 && v <= 1e9;
       default: return true;
     }
   },
@@ -329,19 +332,22 @@ const Calc = {
    * - versement en fin de mois
    * @returns {{final, invested, gains, gainsShare, points:[{month, invested, value}]}}
    */
-  simulate({ monthly = 0, annualRate = 0, years = 0, initial = 0, ter = 0, initialInvested = null }) {
+  simulate({ monthly = 0, annualRate = 0, years = 0, initial = 0, ter = 0, initialInvested = null, growth = 0 }) {
     const net = (1 + annualRate / 100) * (1 - ter / 100) - 1;
     const i = Math.pow(1 + net, 1 / 12) - 1;
     const n = Math.max(0, Math.round(years * 12));
     // Déjà investi au départ (sans les gains passés) ; par défaut = capital de départ
     const base = initialInvested === null ? initial : initialInvested;
     let value = initial;
+    let invested = base;
     const points = [{ month: 0, invested: base, value }];
     for (let m = 1; m <= n; m++) {
-      value = value * (1 + i) + monthly;
-      points.push({ month: m, invested: base + monthly * m, value });
+      // versement revalorisé chaque année de growth %
+      const pay = monthly * Math.pow(1 + growth / 100, Math.floor((m - 1) / 12));
+      value = value * (1 + i) + pay;
+      invested += pay;
+      points.push({ month: m, invested, value });
     }
-    const invested = base + monthly * n;
     const gains = value - invested;
     return {
       final: value,
@@ -350,6 +356,65 @@ const Calc = {
       gainsShare: value > 0 ? gains / value : 0,
       monthlyRate: i,
       points,
+    };
+  },
+
+  /** Prélèvements sociaux sur les gains d'un PEA de plus de 5 ans (taux 2026). */
+  PEA_SOCIAL_RATE: 18.6,
+  /** Flat tax en cas de retrait avant 5 ans (12,8 % d'impôt + prélèvements sociaux). */
+  PEA_EARLY_RATE: 31.4,
+
+  /**
+   * Net en poche au retrait d'un PEA : seuls les gains sont taxés,
+   * 18,6 % après 5 ans, 31,4 % avant.
+   * @returns {{rate, tax, net}}
+   */
+  peaNet(final, invested, peaAgeYears) {
+    const gains = final - invested;
+    const rate = peaAgeYears >= 5 ? Calc.PEA_SOCIAL_RATE : Calc.PEA_EARLY_RATE;
+    const tax = gains > 0 ? gains * rate / 100 : 0;
+    return { rate, tax, net: final - tax };
+  },
+
+  /** Valeur en euros d'aujourd'hui (pouvoir d'achat) après years ans d'inflation. */
+  deflate(value, inflation, years) {
+    return value / Math.pow(1 + inflation / 100, years);
+  },
+
+  /**
+   * Mode objectif : versement mensuel (de départ) nécessaire pour atteindre
+   * target € bruts. La valeur finale est linéaire en fonction du versement.
+   * @returns {number} 0 si le capital de départ suffit déjà
+   */
+  requiredMonthly({ target, years, annualRate = 0, ter = 0, initial = 0, growth = 0 }) {
+    const p = { years, annualRate, ter, initial, growth };
+    const a = Calc.simulate({ ...p, monthly: 0 }).final;
+    const b = Calc.simulate({ ...p, monthly: 1 }).final - a;
+    if (!(b > 0)) return a >= target ? 0 : Infinity;
+    return Math.max(0, (target - a) / b);
+  },
+
+  /** Écart de rendement de la fourchette pessimiste / optimiste (en points). */
+  SIM_SPREAD: 3,
+  /** Profils de rendement proposés. */
+  SIM_PROFILES: [
+    { id: 'prudent', label: 'Prudent', rate: 4 },
+    { id: 'equilibre', label: 'Équilibré', rate: 7 },
+    { id: 'dynamique', label: 'Dynamique', rate: 9 },
+  ],
+
+  /**
+   * Fourchette : même simulation à rendement − spread, rendement, rendement + spread.
+   * @returns {{low, mid, high, lowRate, highRate}} (résultats de simulate)
+   */
+  simRange(params, spread = Calc.SIM_SPREAD) {
+    const lowRate = Math.max(params.annualRate - spread, -99);
+    const highRate = params.annualRate + spread;
+    return {
+      low: Calc.simulate({ ...params, annualRate: lowRate }),
+      mid: Calc.simulate(params),
+      high: Calc.simulate({ ...params, annualRate: highRate }),
+      lowRate, highRate,
     };
   },
 
@@ -603,7 +668,7 @@ const Store = {
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
       settings: { autoRefresh: true }, // actualisation auto des cours 1×/jour à l'ouverture
       lastAutoRefresh: null,    // date de la dernière actualisation automatique
-      sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, useReal: true }, // useReal : partir de mes vrais chiffres
+      sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, growth: 0, inflation: 2, target: 100000, useReal: true, mode: 'projection' }, // useReal : partir de mes vrais chiffres ; mode : projection | objectif
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
       lastExport: null,         // date du dernier export JSON
       theme: 'dark',
@@ -759,8 +824,12 @@ const Store = {
       if (!ins.confirmed && symbol !== tk && ins.isin !== tk) continue;
       instruments[tk] = { isin: ins.isin, mic: ins.mic, symbol, name: String(ins.name || ''), confirmed: !!ins.confirmed };
     }
-    const { useReal: _useReal, ...simNumbers } = def.sim;
-    const sim = { ...pickNumbers(data.sim, simNumbers, (k, v) => Calc.validSim(k, v)), useReal: !(data.sim && data.sim.useReal === false) };
+    const { useReal: _useReal, mode: _mode, ...simNumbers } = def.sim;
+    const sim = {
+      ...pickNumbers(data.sim, simNumbers, (k, v) => Calc.validSim(k, v)),
+      useReal: !(data.sim && data.sim.useReal === false),
+      mode: data.sim && data.sim.mode === 'objectif' ? 'objectif' : 'projection',
+    };
     const plan = pickNumbers(data.plan, def.plan, (k, v) => (k === 'amount' ? v > 0 : v >= 0));
     return {
       state: {
@@ -2323,103 +2392,72 @@ const App = {
   },
 
   /* ---------- Simulateur ---------- */
+  SIM_KEYS: ['target', 'initial', 'monthly', 'years', 'rate', 'ter', 'growth', 'inflation'],
+  SIM_LABELS: {
+    target: 'Objectif', initial: 'Capital de départ', monthly: 'Versement mensuel', years: 'Durée (0 à 80 ans)',
+    rate: 'Rendement (entre −100 et 100 %)', ter: 'Frais (0 à 100 %)', growth: 'Hausse du versement (0 à 20 %)', inflation: 'Inflation (0 à 20 %)',
+  },
+
   bindSimulator() {
     const form = document.getElementById('sim-form');
-    App.bindSimulatorValues();
     form.addEventListener('submit', (e) => e.preventDefault());
 
-    // « Utiliser mes vrais chiffres » : versement mensuel et capital de départ calculés
+    // Profils de rendement
+    const chips = document.getElementById('sim-profiles');
+    for (const p of Calc.SIM_PROFILES) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip'; b.dataset.rate = p.rate;
+      b.textContent = `${p.label} ${Fmt.num(p.rate)} %`;
+      b.addEventListener('click', () => App.setSim({ rate: p.rate }));
+      chips.appendChild(b);
+    }
+    // Projection / Objectif
+    form.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => App.setSim({ mode: b.dataset.mode })));
+
+    // « Partir de mon PEA » : versement mensuel et capital de départ calculés
     const real = document.getElementById('sim-real');
-    real.addEventListener('change', () => {
-      App.state.sim.useReal = real.checked;
-      App.persist();
-      App.bindSimulatorValues();
-      App.renderSimulator();
-      App.renderSimChart();
+    real.addEventListener('change', () => App.setSim({ useReal: real.checked }));
+
+    // Curseur → champ texte (immédiat), champ texte → curseur ; calcul groupé
+    const recompute = App.debounce(() => App.readSimForm(), 120);
+    form.addEventListener('input', (e) => {
+      const t = e.target;
+      if (!t || t.id === 'sim-real') return;
+      if (t.type === 'range') form[t.dataset.for].value = Fmt.input(Number(t.value));
+      else if (t.name) { const r = form.querySelector(`input[type=range][data-for="${t.name}"]`); const v = Calc.parseNumber(t.value, true); if (r && Number.isFinite(v)) r.value = v; }
+      recompute();
     });
-
-    form.addEventListener('input', App.debounce((e) => {
-      if (e && e.target && e.target.id === 'sim-real') return;
-      const v = {
-        monthly: Calc.parseNumber(form.monthly.value, true),
-        rate: Calc.parseNumber(form.rate.value, true),
-        years: Calc.parseNumber(form.years.value, true),
-        initial: Calc.parseNumber(form.initial.value, true),
-        ter: Calc.parseNumber(form.ter.value, true),
-      };
-      // En mode « vrais chiffres », versement et capital viennent des achats : on garde les valeurs libres
-      if (App.realInputs()) { v.monthly = App.state.sim.monthly; v.initial = App.state.sim.initial; }
-      // Saisie incomplète ou hors bornes : on garde le dernier calcul et on le signale
-      const LABELS = { monthly: 'Versement mensuel', rate: 'Rendement (entre −100 et 100 %)', years: 'Durée (0 à 80 ans)', initial: 'Capital de départ', ter: 'Frais (0 à 100 %)' };
-      const bad = Object.keys(v).filter((k) => !Calc.validSim(k, v[k]));
-      const err = document.getElementById('sim-error');
-      err.hidden = !bad.length;
-      err.textContent = bad.length ? `À corriger : ${bad.map((k) => LABELS[k]).join(', ')}.` : '';
-      if (bad.length) return;
-      App.state.sim = { ...v, useReal: App.state.sim.useReal };
-      App.persist();
-      App.renderSimulator();
-      App.renderSimChart();
-    }, 200));
-
-    // « Et si je plaçais de l'argent fictif ? » : rien n'est enregistré
-    const wi = document.getElementById('whatif-form');
-    wi.addEventListener('submit', (e) => e.preventDefault());
-    wi.addEventListener('input', App.debounce(() => App.renderWhatIf(), 150));
-    wi.addEventListener('change', () => App.renderWhatIf());
+    App.bindSimulatorValues();
   },
 
-  /** Durée lisible : 1 → « 1 mois », 18 → « 1 an 6 mois », 120 → « 10 ans ». */
-  fmtMonths(m) {
-    const y = Math.floor(m / 12);
-    const r = m % 12;
-    const ys = y ? `${y} an${y > 1 ? 's' : ''}` : '';
-    const rs = r ? `${r} mois` : '';
-    return [ys, rs].filter(Boolean).join(' ');
+  /** Modifie le simulateur depuis un bouton (profil, mode, option) puis recalcule. */
+  setSim(patch) {
+    App.state.sim = { ...App.state.sim, ...patch };
+    App.persist();
+    App.bindSimulatorValues();
+    App.renderSimulator();
+    App.renderSimChart();
   },
 
-  /** Placement fictif d'un seul versement : valeur finale + jalons (1 mois à 20 ans). */
-  renderWhatIf() {
-    const form = document.getElementById('whatif-form');
-    const err = document.getElementById('whatif-error');
-    const out = document.getElementById('whatif-result');
-    const amount = Calc.parseNumber(form.amount.value, true);
-    const dur = Calc.parseNumber(form.duration.value);
-    const months = Math.round(dur * (form.unit.value === 'years' ? 12 : 1));
-    const bad = [];
-    if (!Calc.validSim('initial', amount) || amount > 1e9) bad.push('Montant');
-    if (!Number.isFinite(months) || months < 1 || months > 960) bad.push('Durée (1 mois à 80 ans)');
+  /** Lit les champs ; saisie incomplète ou hors bornes : on garde le dernier calcul et on le signale. */
+  readSimForm() {
+    const form = document.getElementById('sim-form');
+    const v = {};
+    for (const k of App.SIM_KEYS) v[k] = Calc.parseNumber(form[k].value, true);
+    const real = App.realInputs();
+    // Valeurs calculées (vrais chiffres, versement en mode objectif) : on garde les valeurs libres
+    if (real) { v.monthly = App.state.sim.monthly; v.initial = App.state.sim.initial; }
+    if (App.state.sim.mode === 'objectif') v.monthly = App.state.sim.monthly;
+    else v.target = App.state.sim.target;
+    const bad = App.SIM_KEYS.filter((k) => !Calc.validSim(k, v[k]));
+    const err = document.getElementById('sim-error');
     err.hidden = !bad.length;
-    err.textContent = bad.length ? `À corriger : ${bad.join(', ')}.` : '';
-    out.hidden = !!bad.length;
+    err.textContent = bad.length ? `À corriger : ${bad.map((k) => App.SIM_LABELS[k]).join(', ')}.` : '';
     if (bad.length) return;
-
-    const s = App.state.sim;
-    const marks = [...new Set([1, 3, 6, 12, 60, 120, 240, months])].sort((a, b) => a - b);
-    const rows = Calc.whatIf({ amount, annualRate: s.rate, ter: s.ter, months: marks });
-    const main = rows.find((r) => r.months === months);
-
-    document.getElementById('whatif-label').textContent =
-      `${Fmt.eur0(amount)} placés, valeur au bout de ${App.fmtMonths(months)}`;
-    document.getElementById('whatif-final').textContent = Fmt.eur(main.value);
-    const gain = document.getElementById('whatif-gain');
-    gain.textContent = `${Fmt.signedEur(main.gain)} (${Fmt.signedPct(main.gainPct)}) à ${Fmt.num(s.rate)} %/an, frais ${Fmt.num(s.ter)} %`;
-    gain.className = 'hero-delta ' + Fmt.trend(main.gain);
-
-    const table = document.getElementById('whatif-table');
-    table.replaceChildren();
-    const addRow = (cells, cls, strong) => {
-      const row = document.createElement('div');
-      if (cls) row.className = cls;
-      for (const c of cells) {
-        const span = document.createElement(strong ? 'strong' : 'span');
-        span.textContent = c;
-        row.appendChild(span);
-      }
-      table.appendChild(row);
-    };
-    addRow(['Après', 'Valeur', 'Gain'], 'head', false);
-    for (const r of rows) addRow([App.fmtMonths(r.months), Fmt.eur(r.value), Fmt.signedEur(r.gain)], '', r.months === months);
+    App.state.sim = { ...App.state.sim, ...v };
+    App.persist();
+    App.renderSimulator();
+    App.renderSimChart();
   },
 
   /**
@@ -2434,38 +2472,127 @@ const App = {
     return { pace, monthly: Math.round(pace.monthly), initial: Math.round(pf.value * 100) / 100, initialInvested: pf.invested, pf };
   },
 
-  simResult() {
+  /** Paramètres du calcul (versement déduit de l'objectif en mode objectif). */
+  simParams() {
     const s = App.state.sim;
     const real = App.realInputs();
-    return Calc.simulate({
+    const p = {
       monthly: real ? real.monthly : s.monthly,
       initial: real ? real.initial : s.initial,
       initialInvested: real ? real.initialInvested : null,
-      annualRate: s.rate,
-      years: s.years,
-      ter: s.ter,
-    });
+      annualRate: s.rate, years: s.years, ter: s.ter, growth: s.growth,
+    };
+    let need = null;
+    if (s.mode === 'objectif') {
+      need = Calc.requiredMonthly({ target: s.target, years: s.years, annualRate: s.rate, ter: s.ter, initial: p.initial, growth: s.growth });
+      p.monthly = Number.isFinite(need) ? Math.ceil(need) : 0;
+    }
+    return { p, need, real };
+  },
+
+  simResult() { return Calc.simulate(App.simParams().p); },
+
+  /** Âge du PEA à la fin de la simulation (5 ans révolus = prélèvements sociaux seuls). */
+  simPeaAge(years) {
+    if (!App.realInputs() || !App.state.openingDate) return years;
+    return Math.max(Dates.daysBetween(Dates.parse(App.state.openingDate), Dates.parse(Dates.today())), 0) / 365.25 + years;
   },
 
   renderSimulator() {
     App.fillRealFields();
     App.renderRealCompare();
-    const r = App.simResult();
-    const real = App.realInputs();
-    document.getElementById('sim-final-label').textContent = real
-      ? `Capital estimé dans ${Fmt.num(App.state.sim.years)} an${App.state.sim.years >= 2 ? 's' : ''}`
-      : 'Capital final estimé';
-    document.getElementById('sim-final').textContent = Fmt.eur0(r.final);
+    const s = App.state.sim;
+    const { p, need, real } = App.simParams();
+    const r = Calc.simulate(p);
+    const yearsTxt = `${Fmt.num(s.years)} an${s.years >= 2 ? 's' : ''}`;
+    const goal = s.mode === 'objectif';
+
+    document.querySelectorAll('#sim-form .seg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === s.mode));
+    document.querySelectorAll('#sim-profiles .chip').forEach((b) => b.classList.toggle('active', Number(b.dataset.rate) === s.rate));
+    document.getElementById('sim-mode-hint').textContent = goal
+      ? 'Indiquez la somme visée : l\'appli calcule le versement mensuel nécessaire.'
+      : 'Combien vaudra votre épargne, selon vos versements.';
+    document.getElementById('sim-row-target').hidden = !goal;
+    document.getElementById('sim-row-monthly').hidden = goal;
+
+    const detail = document.getElementById('sim-goal-detail');
+    if (goal) {
+      document.getElementById('sim-final-label').textContent = `Pour viser ${Fmt.eur0(s.target)} dans ${yearsTxt}`;
+      if (!Number.isFinite(need)) {
+        document.getElementById('sim-final').textContent = 'Inatteignable';
+        detail.textContent = 'Avec ce rendement, aucun versement ne permet d\'atteindre l\'objectif. Allongez la durée ou augmentez le rendement.';
+      } else if (need === 0) {
+        document.getElementById('sim-final').textContent = '0 € / mois';
+        detail.textContent = `Votre capital de départ suffit : ${Fmt.eur0(r.final)} attendus sans rien ajouter.`;
+      } else {
+        document.getElementById('sim-final').textContent = `${Fmt.eur0(p.monthly)} / mois`;
+        const parts = [];
+        if (s.growth > 0) parts.push(`Au départ, puis +${Fmt.num(s.growth)} % chaque année.`);
+        if (real) {
+          const gap = p.monthly - real.monthly;
+          parts.push(gap > 0 ? `Vous versez ${Fmt.eur0(real.monthly)}/mois aujourd'hui : ${Fmt.eur0(gap)} de plus par mois.` : `Vous versez déjà ${Fmt.eur0(real.monthly)}/mois : c'est suffisant.`);
+        }
+        detail.textContent = parts.join(' ');
+      }
+      detail.hidden = !detail.textContent;
+    } else {
+      document.getElementById('sim-final-label').textContent = `Capital estimé dans ${yearsTxt}`;
+      document.getElementById('sim-final').textContent = Fmt.eur0(r.final);
+      detail.hidden = true;
+    }
+
+    // Net en poche et pouvoir d'achat
+    const age = App.simPeaAge(s.years);
+    const net = Calc.peaNet(r.final, r.invested, age);
+    document.getElementById('sim-net').textContent = Fmt.eur0(net.net);
+    document.getElementById('sim-net-hint').textContent = net.tax > 0
+      ? `− ${Fmt.eur0(net.tax)} (${Fmt.num(net.rate)} % des gains${age < 5 ? ', retrait avant 5 ans' : ''})`
+      : 'Aucun gain taxable';
+    document.getElementById('sim-today').textContent = Fmt.eur0(Calc.deflate(net.net, s.inflation, s.years));
+    document.getElementById('sim-today-hint').textContent = `Net, avec ${Fmt.num(s.inflation)} % d'inflation par an`;
+
     document.getElementById('sim-invested').textContent = Fmt.eur0(r.invested);
-    const g = document.getElementById('sim-gains');
-    g.textContent = Fmt.eur0(r.gains);
+    document.getElementById('sim-gains').textContent = Fmt.eur0(r.gains);
     const investedShare = r.final > 0 ? Math.min(r.invested / r.final, 1) : 1;
     document.getElementById('sim-bar-invested').style.width = (investedShare * 100) + '%';
     document.getElementById('sim-bar-gains').style.width = (Math.max(1 - investedShare, 0) * 100) + '%';
     document.getElementById('sim-share').textContent = r.gains >= 0
       ? `Les gains représentent ${Fmt.pct(r.gainsShare)} du capital final (×${Fmt.num(Math.round((r.final / (r.invested || 1)) * 100) / 100)} vos versements).`
       : 'Rendement net négatif : le capital final est inférieur aux versements.';
-    App.renderWhatIf();
+
+    // Fourchette
+    const rg = Calc.simRange(p);
+    document.getElementById('sim-legend-high').textContent = `Optimiste ${Fmt.num(rg.highRate)} %`;
+    document.getElementById('sim-legend-mid').textContent = `Médian ${Fmt.num(s.rate)} %`;
+    document.getElementById('sim-legend-low').textContent = `Pessimiste ${Fmt.num(rg.lowRate)} %`;
+    document.getElementById('sim-range').textContent =
+      `Dans ${yearsTxt}, entre ${Fmt.eur0(rg.low.final)} et ${Fmt.eur0(rg.high.final)} selon que la bourse rapporte ${Fmt.num(Calc.SIM_SPREAD)} points de moins ou de plus par an.`;
+
+    App.renderSimTable(r, s);
+  },
+
+  /** Tableau des étapes : 1, 5, 10, 20, 30 ans… jusqu'à la durée choisie. */
+  renderSimTable(r, s) {
+    const table = document.getElementById('sim-table');
+    table.replaceChildren();
+    const marks = [...new Set([1, 5, 10, 20, 30, s.years].filter((y) => y > 0 && y <= s.years).map((y) => Math.round(y * 12)))].sort((a, b) => a - b);
+    const addRow = (cells, cls, strong) => {
+      const row = document.createElement('div');
+      if (cls) row.className = cls;
+      for (const c of cells) {
+        const span = document.createElement(strong ? 'strong' : 'span');
+        span.textContent = c;
+        row.appendChild(span);
+      }
+      table.appendChild(row);
+    };
+    addRow(['Après', 'Versé', 'Valeur', 'Net'], 'head', false);
+    for (const m of marks) {
+      const pt = r.points[Math.min(m, r.points.length - 1)];
+      const y = m / 12;
+      const net = Calc.peaNet(pt.value, pt.invested, App.simPeaAge(y));
+      addRow([`${Fmt.num(Math.round(y * 10) / 10)} an${y >= 2 ? 's' : ''}`, Fmt.eur0(pt.invested), Fmt.eur0(pt.value), Fmt.eur0(net.net)], '', m === Math.round(s.years * 12));
+    }
   },
 
   /** En mode « vrais chiffres », affiche les valeurs calculées dans les champs (non modifiables). */
@@ -2477,17 +2604,27 @@ const App = {
     toggle.checked = App.state.sim.useReal;
     toggle.disabled = !hasPurchases;
     const real = App.realInputs();
-    form.monthly.disabled = !!real;
-    form.initial.disabled = !!real;
+    for (const k of ['monthly', 'initial']) {
+      form[k].disabled = !!real;
+      form.querySelector(`input[type=range][data-for="${k}"]`).disabled = !!real;
+    }
     if (real) {
-      form.monthly.value = Fmt.input(real.monthly);
-      form.initial.value = Fmt.input(real.initial);
+      App.setSimField('monthly', real.monthly);
+      App.setSimField('initial', real.initial);
       hint.textContent = `${Fmt.eur0(real.monthly)}/mois en moyenne depuis le ${Fmt.date(real.pace.since)}, départ de votre valeur actuelle (${Fmt.eur(real.initial)}).`;
     } else {
       hint.textContent = hasPurchases
         ? 'Valeur actuelle et versement mensuel moyen, calculés depuis vos achats.'
         : 'Ajoutez des achats pour partir de vos vrais chiffres.';
     }
+  },
+
+  /** Écrit une valeur dans le champ texte et le curseur associé. */
+  setSimField(k, v) {
+    const form = document.getElementById('sim-form');
+    if (document.activeElement !== form[k]) form[k].value = Fmt.input(v);
+    const r = form.querySelector(`input[type=range][data-for="${k}"]`);
+    if (r) r.value = v;
   },
 
   /** Carte « Mon DCA réel vs l'hypothèse » : valeur réelle vs valeur au taux choisi. */
@@ -2567,23 +2704,29 @@ const App = {
     App.renderRealChart();
     const el = document.getElementById('chart-sim');
     if (el.offsetParent === null) return;
-    const r = App.simResult();
+    const rg = Calc.simRange(App.simParams().p);
     // Un point par an (plus lisible et léger) + le dernier mois
-    const pts = r.points.filter((p, i) => p.month % 12 === 0 || i === r.points.length - 1);
-    if (pts.length < 2) { drawChart(el, { xs: [], series: [], xLabel: String, yFormat: Fmt.eur, emptyText: 'Indiquez une durée' }); return; }
+    const keep = (p, i, all) => p.month % 12 === 0 || i === all.length - 1;
+    const mid = rg.mid.points.filter(keep);
+    const low = rg.low.points.filter(keep);
+    const high = rg.high.points.filter(keep);
+    if (mid.length < 2) { drawChart(el, { xs: [], series: [], xLabel: String, yFormat: Fmt.eur, emptyText: 'Indiquez une durée' }); return; }
+    const s = App.state.sim;
     drawChart(el, {
-      xs: pts.map((p) => p.month / 12),
+      xs: mid.map((p) => p.month / 12),
       series: [
-        { name: 'Versé', color: '--series-invested', values: pts.map((p) => p.invested), area: true },
-        { name: 'Gains', color: '--series-gains', values: pts.map((p) => Math.max(p.value - p.invested, 0)), area: true },
+        { name: 'Versé', color: '--series-invested', values: mid.map((p) => p.invested), area: true },
+        { name: 'Optimiste', color: '--good', values: high.map((p) => p.value), dash: true },
+        { name: 'Médian', color: '--series-value', values: mid.map((p) => p.value) },
+        { name: 'Pessimiste', color: '--series-rate', values: low.map((p) => p.value), dash: true },
       ],
-      stacked: true,
       xLabel: (x) => `${Fmt.num(Math.round(x * 10) / 10)} an${x >= 2 ? 's' : ''}`,
       tooltipTitle: (x) => `Après ${Fmt.num(Math.round(x * 10) / 10)} an${x >= 2 ? 's' : ''}`,
       tooltipRows: (i) => [
-        { name: 'Capital', value: Fmt.eur0(pts[i].value) },
-        { name: 'Versé', color: '--series-invested', value: Fmt.eur0(pts[i].invested) },
-        { name: 'Gains', color: '--series-gains', value: Fmt.eur0(pts[i].value - pts[i].invested) },
+        { name: `Optimiste ${Fmt.num(rg.highRate)} %`, color: '--good', value: Fmt.eur0(high[i].value) },
+        { name: `Médian ${Fmt.num(s.rate)} %`, color: '--series-value', value: Fmt.eur0(mid[i].value) },
+        { name: `Pessimiste ${Fmt.num(rg.lowRate)} %`, color: '--series-rate', value: Fmt.eur0(low[i].value) },
+        { name: 'Versé', color: '--series-invested', value: Fmt.eur0(mid[i].invested) },
       ],
       yFormat: Fmt.eur0,
     });
@@ -2804,11 +2947,10 @@ const App = {
     reader.readAsText(file);
   },
 
-  /** Recharge les champs du simulateur après un import. */
+  /** Recharge les champs du simulateur (démarrage, import, profil). */
   bindSimulatorValues() {
-    const form = document.getElementById('sim-form');
     const s = App.state.sim;
-    for (const k of ['monthly', 'rate', 'years', 'initial', 'ter']) form[k].value = Fmt.input(s[k]);
+    for (const k of App.SIM_KEYS) App.setSimField(k, s[k]);
   },
 };
 

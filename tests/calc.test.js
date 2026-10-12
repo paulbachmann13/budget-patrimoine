@@ -291,7 +291,7 @@ test('import : nombres en texte, identifiants en double, réglages invalides', (
   assert.equal(s.purchases[0].price, 6.12);
   assert.equal(s.purchases[0].fees, 0.99);
   assert.notEqual(s.purchases[0].id, s.purchases[1].id);
-  assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3, useReal: true });
+  assert.deepEqual(s.sim, { monthly: 150, rate: 7, years: 20, initial: 0, ter: 0.3, growth: 0, inflation: 2, target: 100000, useReal: true, mode: 'projection' });
   assert.deepEqual(s.plan, { amount: 100, fees: 1 });
   assert.deepEqual(s.prices.DCAM, { price: 6.2, date: '', source: 'manuel', at: null });
   assert.throws(() => Store.sanitize({ purchases: [{ date: '2026-01-05', ticker: 'X', qty: Infinity, price: 1 }] }));
@@ -647,4 +647,48 @@ test('et si : taux nul, frais ETF et montant nul', () => {
   const zero = Calc.whatIf({ amount: 0, annualRate: 7, months: [12] })[0];
   assert.equal(zero.value, 0);
   assert.equal(zero.gainPct, 0);
+});
+
+test('simulateur : versement revalorisé chaque année', () => {
+  // 100 €/mois la 1re année, 110 €/mois la 2e, taux nul
+  const r = Calc.simulate({ monthly: 100, annualRate: 0, years: 2, growth: 10 });
+  close(r.invested, 1200 + 1320);
+  close(r.final, 2520);
+  close(Calc.simulate({ monthly: 100, annualRate: 5, years: 3, growth: 0 }).final, Calc.simulate({ monthly: 100, annualRate: 5, years: 3 }).final);
+});
+
+test('simulateur : net en poche d\'un PEA (18,6 % après 5 ans, 31,4 % avant)', () => {
+  const after = Calc.peaNet(15000, 10000, 6);
+  close(after.tax, 930); close(after.net, 14070); assert.equal(after.rate, 18.6);
+  const before = Calc.peaNet(15000, 10000, 3);
+  close(before.tax, 1570); assert.equal(before.rate, 31.4);
+  const loss = Calc.peaNet(9000, 10000, 8);
+  close(loss.tax, 0); close(loss.net, 9000);
+});
+
+test('simulateur : euros d\'aujourd\'hui (inflation)', () => {
+  close(Calc.deflate(1102.5, 5, 2), 1000);
+  close(Calc.deflate(1000, 0, 10), 1000);
+});
+
+test('simulateur : mode objectif, versement nécessaire', () => {
+  const m = Calc.requiredMonthly({ target: 100000, years: 15, annualRate: 7, ter: 0.2, initial: 5000, growth: 2 });
+  close(Calc.simulate({ monthly: m, years: 15, annualRate: 7, ter: 0.2, initial: 5000, growth: 2 }).final, 100000, 1e-4);
+  close(Calc.requiredMonthly({ target: 1200, years: 1, annualRate: 0 }), 100);
+  assert.equal(Calc.requiredMonthly({ target: 1000, years: 10, annualRate: 7, initial: 5000 }), 0);
+  assert.equal(Calc.requiredMonthly({ target: 1000, years: 0, annualRate: 7 }), Infinity);
+});
+
+test('simulateur : fourchette pessimiste / optimiste', () => {
+  const rg = Calc.simRange({ monthly: 100, annualRate: 7, years: 20 });
+  assert.equal(rg.lowRate, 4); assert.equal(rg.highRate, 10);
+  assert.ok(rg.low.final < rg.mid.final && rg.mid.final < rg.high.final);
+  close(rg.mid.final, Calc.simulate({ monthly: 100, annualRate: 7, years: 20 }).final);
+  assert.equal(Calc.simRange({ annualRate: -98, years: 1 }).lowRate, -99);
+});
+
+test('import : réglages du simulateur (mode, options)', () => {
+  const s = Store.sanitize({ purchases: [], sim: { mode: 'objectif', target: '50000', growth: 25, inflation: '1,5' } }).sim;
+  assert.equal(s.mode, 'objectif'); assert.equal(s.target, 50000); assert.equal(s.growth, 0); assert.equal(s.inflation, 1.5);
+  assert.equal(Store.sanitize({ purchases: [], sim: { mode: 'bidule' } }).sim.mode, 'projection');
 });

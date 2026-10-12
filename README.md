@@ -4,7 +4,7 @@ PWA (HTML/CSS/JS vanilla, sans build, hébergée sur GitHub Pages) qui réunit :
 
 - **Patrimoine** : comptes saisis à la main (regroupés par banque) + PEA calculé automatiquement ; argent **disponible maintenant / bloqué** (PEL, CEL, PEA avant 5 ans…) avec dates de déblocage ; courbe du patrimoine mois par mois.
 - **Budget** : import d'exports bancaires CSV (format Crédit Agricole reconnu), libellés lisibles, catégorisation automatique, revenus / dépenses / taux d'épargne (aide reçue affichée à part), plafonds par catégorie, évolution d'une catégorie sur 12 mois, **abonnements et prélèvements détectés**, **fin de mois estimée**, **récap du mois**, rappels (import, sauvegarde).
-- **PEA** (onglets Bilan, Achats, Simu, PEA) : achats et **ventes au PRU**, versements, régularisations, frais, retraits, bilan d'une position (gain, rendement annualisé, graphique), compteur des 5 ans, plafond, simulateur, cours Euronext.
+- **PEA** (onglets Bilan, Achats, Simu, PEA) : achats et **ventes au PRU**, versements, régularisations, frais, retraits, bilan d'une position (gain, rendement annualisé, graphique), compteur des 5 ans, plafond, simulateur (projection ou objectif, fourchette pessimiste/optimiste, net de prélèvements sociaux, en euros d'aujourd'hui), cours Euronext.
 - **Synchronisation chiffrée** entre appareils (Supabase) et **verrouillage** par code + Face ID / Touch ID.
 
 Les données restent **dans le navigateur** (localStorage) ; elles ne quittent l'appareil que chiffrées.

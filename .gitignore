@@ -7,3 +7,6 @@ node_modules/
 
 # Exception : fixtures de test publiques (cours Euronext, aucune donnée perso)
 !tests/fixtures/euronext-*.csv
+
+# Vidéos (lourdes, hors dépôt)
+*.mp4

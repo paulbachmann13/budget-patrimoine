@@ -560,3 +560,27 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .sync-log p { margin: 4px 0; font-size: 12px; overflow-wrap: anywhere; }
 #sync-log-box { margin-top: 8px; }
 #sync-log-box summary { cursor: pointer; }
+
+/* ---------- Simulateur ---------- */
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 14px; background: var(--surface-2); }
+.seg button { min-height: 44px; border: 0; border-radius: 10px; background: transparent; color: var(--ink-2); font: inherit; font-weight: 600; cursor: pointer; }
+.seg button.active { background: var(--accent); color: var(--accent-ink); }
+#sim-mode-hint { margin: 8px 0 4px; }
+.sim .switch-row { margin-top: 8px; }
+.sim-field { margin-top: 14px; }
+.sim-field[hidden] { display: none; }
+.sim-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.form .sim-head label { color: var(--ink-2); font-size: 14px; }
+.sim-val { display: flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 15px; flex: none; }
+.sim-val input[type="text"] { width: 112px; min-height: 40px; margin: 0; padding: 0 10px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sim-field input[type="range"] { display: block; width: 100%; margin: 10px 0 0; height: 28px; accent-color: var(--accent); }
+.sim-field input[type="range"]:disabled { opacity: .45; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.chip { min-height: 40px; padding: 0 14px; border-radius: 20px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.chip.active { background: var(--accent); border-color: transparent; color: var(--accent-ink); }
+.sim-more { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.sim-more summary { cursor: pointer; color: var(--ink-2); font-weight: 600; min-height: 32px; }
+.sim-legend { flex-wrap: wrap; row-gap: 4px; padding: 0 0 8px; }
+.key-good { background: repeating-linear-gradient(90deg, var(--good) 0 5px, transparent 5px 8px); }
+.sim-table > div { grid-template-columns: 0.8fr 1fr 1fr 1fr; }
+#sim-goal-detail { margin-top: 0; }

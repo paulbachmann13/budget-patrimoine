@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.9.4">
+  <link rel="stylesheet" href="style.css?v=2.10.0">
 </head>
 <body>
   <header class="topbar">
@@ -424,34 +424,65 @@
         <p class="hint" id="real-chart-hint" hidden>La courbe s'affiche pour les titres dont l'historique est publié chaque soir (DCAM).</p>
       </div>
 
-      <form id="sim-form" class="card form" autocomplete="off">
+      <form id="sim-form" class="card form sim" autocomplete="off">
+        <div class="seg" role="group" aria-label="Type de simulation">
+          <button type="button" data-mode="projection">Projection</button>
+          <button type="button" data-mode="objectif">Objectif</button>
+        </div>
+        <p class="hint" id="sim-mode-hint"></p>
         <label class="switch-row">
-          <span>Utiliser mes vrais chiffres
+          <span>Partir de mon PEA
             <small class="hint" id="sim-real-hint">Valeur actuelle et versement mensuel moyen, calculés depuis vos achats.</small>
           </span>
           <input type="checkbox" id="sim-real" role="switch">
         </label>
-        <label>Versement mensuel (€)
-          <input name="monthly" inputmode="decimal" type="text" required>
-        </label>
-        <label>Rendement annuel moyen (%)
-          <input name="rate" inputmode="decimal" type="text" required>
-        </label>
-        <label>Durée (années)
-          <input name="years" inputmode="numeric" type="text" required>
-        </label>
-        <label>Capital de départ (€)
-          <input name="initial" inputmode="decimal" type="text">
-        </label>
-        <label>Frais annuels de l'ETF (%)
-          <input name="ter" inputmode="decimal" type="text">
-        </label>
+        <div class="sim-field" id="sim-row-target">
+          <div class="sim-head"><label for="sim-target">Objectif</label><span class="sim-val"><input id="sim-target" name="target" inputmode="decimal" type="text" required><span>€</span></span></div>
+          <input type="range" min="1000" max="500000" step="1000" data-for="target" aria-label="Objectif">
+        </div>
+        <div class="sim-field" id="sim-row-initial">
+          <div class="sim-head"><label for="sim-initial">Capital de départ</label><span class="sim-val"><input id="sim-initial" name="initial" inputmode="decimal" type="text" required><span>€</span></span></div>
+          <input type="range" min="0" max="100000" step="500" data-for="initial" aria-label="Capital de départ">
+        </div>
+        <div class="sim-field" id="sim-row-monthly">
+          <div class="sim-head"><label for="sim-monthly">Versement mensuel</label><span class="sim-val"><input id="sim-monthly" name="monthly" inputmode="decimal" type="text" required><span>€</span></span></div>
+          <input type="range" min="0" max="2000" step="10" data-for="monthly" aria-label="Versement mensuel">
+        </div>
+        <div class="sim-field" id="sim-row-years">
+          <div class="sim-head"><label for="sim-years">Durée</label><span class="sim-val"><input id="sim-years" name="years" inputmode="decimal" type="text" required><span>ans</span></span></div>
+          <input type="range" min="1" max="40" step="1" data-for="years" aria-label="Durée">
+        </div>
+        <div class="sim-field">
+          <div class="sim-head"><label for="sim-rate">Rendement annuel moyen</label><span class="sim-val"><input id="sim-rate" name="rate" inputmode="decimal" type="text" required><span>%</span></span></div>
+          <div class="chips" id="sim-profiles" role="group" aria-label="Profils de rendement"></div>
+          <input type="range" min="0" max="15" step="0.5" data-for="rate" aria-label="Rendement annuel moyen">
+        </div>
+        <details class="sim-more">
+          <summary>Plus d'options</summary>
+        <div class="sim-field" id="sim-row-ter">
+          <div class="sim-head"><label for="sim-ter">Frais annuels de l'ETF</label><span class="sim-val"><input id="sim-ter" name="ter" inputmode="decimal" type="text" required><span>%</span></span></div>
+          <input type="range" min="0" max="1.5" step="0.05" data-for="ter" aria-label="Frais annuels de l'ETF">
+        </div>
+        <div class="sim-field" id="sim-row-growth">
+          <div class="sim-head"><label for="sim-growth">Hausse du versement chaque année</label><span class="sim-val"><input id="sim-growth" name="growth" inputmode="decimal" type="text" required><span>%</span></span></div>
+          <input type="range" min="0" max="10" step="0.5" data-for="growth" aria-label="Hausse du versement chaque année">
+        </div>
+        <div class="sim-field" id="sim-row-inflation">
+          <div class="sim-head"><label for="sim-inflation">Inflation</label><span class="sim-val"><input id="sim-inflation" name="inflation" inputmode="decimal" type="text" required><span>%/an</span></span></div>
+          <input type="range" min="0" max="5" step="0.1" data-for="inflation" aria-label="Inflation">
+        </div>
+        </details>
         <p class="error" id="sim-error" hidden></p>
       </form>
 
       <div class="hero card">
         <p class="label" id="sim-final-label">Capital final estimé</p>
         <p class="hero-value" id="sim-final">0,00 €</p>
+        <p class="hint" id="sim-goal-detail" hidden></p>
+        <div class="split">
+          <div><p class="label">Net en poche</p><p class="kpi-value" id="sim-net">—</p><p class="hint" id="sim-net-hint"></p></div>
+          <div><p class="label">En euros d'aujourd'hui</p><p class="kpi-value" id="sim-today">—</p><p class="hint" id="sim-today-hint"></p></div>
+        </div>
         <div class="split">
           <div><p class="label"><span class="key key-invested"></span>Versé</p><p class="kpi-value" id="sim-invested">0 €</p></div>
           <div><p class="label"><span class="key key-gains"></span>Gains</p><p class="kpi-value" id="sim-gains">0 €</p></div>
@@ -461,36 +492,23 @@
       </div>
 
       <div class="card chart-card">
-        <div id="chart-sim" class="chart" role="img" aria-label="Projection du capital"></div>
+        <h2 class="card-title">Fourchette</h2>
+        <div class="legend sim-legend">
+          <span><i class="key key-invested"></i>Versé</span>
+          <span><i class="key-line key-good"></i><span id="sim-legend-high">Optimiste</span></span>
+          <span><i class="key-line key-value"></i><span id="sim-legend-mid">Médian</span></span>
+          <span><i class="key-line key-rate"></i><span id="sim-legend-low">Pessimiste</span></span>
+        </div>
+        <div id="chart-sim" class="chart" role="img" aria-label="Projection du capital : fourchette pessimiste, médiane et optimiste"></div>
+        <p class="hint" id="sim-range"></p>
       </div>
-      <!-- Argent fictif : un seul versement, rien n'est enregistré -->
-      <form id="whatif-form" class="card form" autocomplete="off">
-        <h2 class="card-title">Et si je plaçais de l'argent fictif ?</h2>
-        <div class="row">
-          <label>Montant placé (€)
-            <input name="amount" inputmode="decimal" type="text" value="10000" required>
-          </label>
-          <label>Au bout de
-            <input name="duration" inputmode="numeric" type="text" value="1" required>
-          </label>
-          <label>Unité
-            <select name="unit">
-              <option value="months">mois</option>
-              <option value="years">ans</option>
-            </select>
-          </label>
-        </div>
-        <p class="error" id="whatif-error" hidden></p>
-        <div id="whatif-result" hidden>
-          <p class="label" id="whatif-label" style="margin-top:16px"></p>
-          <p class="hero-value" id="whatif-final"></p>
-          <p class="hero-delta" id="whatif-gain"></p>
-          <div class="whatif-table" id="whatif-table"></div>
-        </div>
-        <p class="hint">Un seul versement, aucun achat réel : rien n'est enregistré. Rendement et frais repris des réglages ci-dessus. Sur un mois, la bourse peut varier de plusieurs % dans un sens ou dans l'autre : le résultat réel peut être très différent de cette moyenne.</p>
-      </form>
 
-      <p class="hint">Simulation indicative : rendement constant, versements en fin de mois, hors fiscalité. Les performances passées ne préjugent pas des performances futures.</p>
+      <div class="card">
+        <h2 class="card-title">Étapes</h2>
+        <div class="whatif-table sim-table" id="sim-table"></div>
+      </div>
+
+      <p class="hint">Simulation indicative : rendement constant, versements en fin de mois. Net en poche : prélèvements sociaux de 18,6 % sur les gains d'un PEA de plus de 5 ans (31,4 % avant), taux 2026. Les performances passées ne préjugent pas des performances futures.</p>
     </section>
 
     <!-- =========================================================
@@ -742,9 +760,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.9.4"></script>
-  <script src="app.js?v=2.9.4"></script>
-  <script src="sync.js?v=2.9.4"></script>
-  <script src="lock.js?v=2.9.4"></script>
+  <script src="budget.js?v=2.10.0"></script>
+  <script src="app.js?v=2.10.0"></script>
+  <script src="sync.js?v=2.10.0"></script>
+  <script src="lock.js?v=2.10.0"></script>
 </body>
 </html>
