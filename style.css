@@ -589,3 +589,9 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .bench-pick { display: flex; align-items: center; gap: 8px; padding: 0 8px 8px; font-size: 13px; color: var(--ink-2); }
 .bench-pick select { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--muted); border-radius: 8px; padding: 4px 8px; }
 .bench-note { padding: 0 8px; }
+
+/* Répartition */
+.alloc-row { display: grid; grid-template-columns: 5.5em 1fr auto; align-items: center; gap: 8px; margin: 6px 0; font-size: 14px; }
+.alloc-row b { font-variant-numeric: tabular-nums; font-weight: 600; }
+.alloc-bar { height: 8px; border-radius: 4px; background: var(--muted); background: color-mix(in srgb, var(--muted) 25%, transparent); overflow: hidden; }
+.alloc-bar i { display: block; height: 100%; background: var(--series-invested); border-radius: 4px; }

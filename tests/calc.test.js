@@ -761,3 +761,18 @@ test('import : un dividende exige un titre', () => {
   assert.equal(s.moves[0].ticker, 'ORA');
   assert.throws(() => Store.sanitize({ purchases: [], moves: [{ id: 'y', date: '2026-03-01', amount: 12, kind: 'dividende' }] }));
 });
+
+test('répartition : par titre et par zone, alerte sur une action trop lourde', () => {
+  const pos = [{ ticker: 'PSP5', value: 600 }, { ticker: 'ORA', value: 300 }, { ticker: 'VIDE', value: 0 }];
+  const ins = { PSP5: { name: 'Amundi PEA S&P 500 UCITS ETF Acc', isin: 'FR0011871128' }, ORA: { name: 'Orange', isin: 'FR0000133308' } };
+  const a = Calc.allocation(pos, ins, 100);
+  assert.equal(a.total, 1000);
+  assert.deepEqual(a.byTicker.map((t) => t.ticker), ['PSP5', 'ORA']);
+  close(a.byTicker[0].share, 0.6);
+  assert.deepEqual(a.byZone.map((z) => z.zone), ['États-Unis', 'France']);
+  close(a.cashShare, 0.1);
+  assert.equal(a.alerts.length, 1); // ORA = 30 % et ce n'est pas un ETF
+  assert.match(a.alerts[0], /ORA/);
+  assert.equal(Calc.allocation(pos.slice(0, 1), ins).alerts.length, 1); // un seul ETF non « Monde »
+  assert.deepEqual(Calc.allocation([], {}).byTicker, []);
+});
