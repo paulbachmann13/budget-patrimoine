@@ -584,3 +584,8 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .key-good { background: repeating-linear-gradient(90deg, var(--good) 0 5px, transparent 5px 8px); }
 .sim-table > div { grid-template-columns: 0.8fr 1fr 1fr 1fr; }
 #sim-goal-detail { margin-top: 0; }
+
+/* Comparaison à un indice */
+.bench-pick { display: flex; align-items: center; gap: 8px; padding: 0 8px 8px; font-size: 13px; color: var(--ink-2); }
+.bench-pick select { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--muted); border-radius: 8px; padding: 4px 8px; }
+.bench-note { padding: 0 8px; }

@@ -692,3 +692,32 @@ test('import : réglages du simulateur (mode, options)', () => {
   assert.equal(s.mode, 'objectif'); assert.equal(s.target, 50000); assert.equal(s.growth, 0); assert.equal(s.inflation, 1.5);
   assert.equal(Store.sanitize({ purchases: [], sim: { mode: 'bidule' } }).sim.mode, 'projection');
 });
+
+test('benchmarkSeries : mêmes sommes placées dans l\'indice', () => {
+  const idx = [['2026-01-05', 100], ['2026-01-06', 110], ['2026-01-07', 99]];
+  const buys = [{ date: '2026-01-05', ticker: 'X', qty: 10, price: 5, fees: 1 }]; // 50 € hors frais
+  const s = Calc.benchmarkSeries(buys, idx);
+  assert.deepEqual(s.map((p) => p.date), ['2026-01-05', '2026-01-06', '2026-01-07']);
+  close(s[1].pct, 0.10);
+  close(s[2].pct, -0.01);
+  assert.deepEqual(Calc.benchmarkSeries(buys, []), []);
+  // achat avant le début de l'historique de l'indice : ignoré
+  assert.deepEqual(Calc.benchmarkSeries([{ date: '2025-01-01', ticker: 'X', qty: 1, price: 1, fees: 0 }], idx), []);
+});
+
+test('alignPct : dernière valeur connue à chaque date', () => {
+  const s = [{ date: '2026-01-05', pct: 0.1 }, { date: '2026-01-07', pct: 0.2 }];
+  assert.deepEqual(Calc.alignPct(s, ['2026-01-04', '2026-01-05', '2026-01-06', '2026-01-07']), [null, 0.1, 0.1, 0.2]);
+});
+
+test('parsePricesFile lit aussi les indices de référence', () => {
+  const parsed = parsePricesFile({ quotes: {}, benchmarks: { CAC40: { history: [['2026-01-06', 8100], ['2026-01-05', 8000], ['pas une date', 1]] } } });
+  assert.deepEqual(parsed.benchmarks.CAC40, [['2026-01-05', 8000], ['2026-01-06', 8100]]);
+  assert.deepEqual(parsePricesFile({ quotes: {} }).benchmarks, {});
+});
+
+test('un indice de comparaison inconnu est ignoré à l\'import', () => {
+  const ok = Store.sanitize({ purchases: [], settings: { benchmark: 'CAC40' } });
+  assert.equal(ok.settings.benchmark, 'CAC40');
+  assert.equal(Store.sanitize({ purchases: [], settings: { benchmark: 'bidon' } }).settings.benchmark, '');
+});

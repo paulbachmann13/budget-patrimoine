@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.10.0">
+  <link rel="stylesheet" href="style.css?v=2.11.0">
 </head>
 <body>
   <header class="topbar">
@@ -358,7 +358,17 @@
 
       <h2 id="chart-perf-title">Ma performance <span class="perf-now" id="chart-perf-now"></span></h2>
       <div class="card chart-card" id="chart-perf-card">
+        <label class="bench-pick">Comparer à
+          <select id="bench-select">
+            <option value="">Aucun indice</option>
+            <option value="CAC40">CAC 40</option>
+            <option value="STOXX50">Euro Stoxx 50</option>
+            <option value="MSCIWORLD">MSCI World</option>
+            <option value="SP500">S&amp;P 500 (en $)</option>
+          </select>
+        </label>
         <div id="chart-perf" class="chart" role="img" aria-label="Performance totale du portefeuille depuis le premier achat"></div>
+        <p class="hint bench-note" id="chart-perf-bench" hidden></p>
         <p class="hint" id="chart-perf-hint" hidden></p>
       </div>
 
@@ -760,9 +770,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.10.0"></script>
-  <script src="app.js?v=2.10.0"></script>
-  <script src="sync.js?v=2.10.0"></script>
-  <script src="lock.js?v=2.10.0"></script>
+  <script src="budget.js?v=2.11.0"></script>
+  <script src="app.js?v=2.11.0"></script>
+  <script src="sync.js?v=2.11.0"></script>
+  <script src="lock.js?v=2.11.0"></script>
 </body>
 </html>
