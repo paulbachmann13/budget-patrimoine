@@ -721,3 +721,21 @@ test('un indice de comparaison inconnu est ignoré à l\'import', () => {
   assert.equal(ok.settings.benchmark, 'CAC40');
   assert.equal(Store.sanitize({ purchases: [], settings: { benchmark: 'bidon' } }).settings.benchmark, '');
 });
+
+test('suggestBenchmark : indice cohérent avec le titre', () => {
+  const k = (name, isin) => Calc.suggestBenchmark({ name, isin }).key;
+  assert.equal(k('Amundi PEA S&P 500 UCITS ETF Acc', 'FR0011871128'), 'SP500');
+  assert.equal(k('Amundi PEA MSCI World UCITS ETF Acc', 'FR001400U5Q4'), 'MSCIWORLD');
+  assert.equal(k('Amundi PEA Nasdaq-100 UCITS ETF', 'FR0000000000'), 'NASDAQ100');
+  assert.equal(k('Orange', 'FR0000133308'), 'CAC40');
+  assert.equal(k('Siemens', 'DE0007236101'), 'DAX');
+  assert.equal(k('Apple', 'US0378331005'), 'SP500');
+  assert.equal(k('Truc inconnu', 'XX0000000000'), 'MSCIWORLD');
+  assert.equal(Calc.suggestBenchmark(undefined).key, 'MSCIWORLD');
+});
+
+test('réglages : un indice par titre, valeurs inconnues ignorées', () => {
+  const s = Store.sanitize({ purchases: [], settings: { benchmark: 'none', benchmarks: { PSP5: 'SP500', X: 'bidon', Y: 'none' } } });
+  assert.equal(s.settings.benchmark, 'none');
+  assert.deepEqual(s.settings.benchmarks, { PSP5: 'SP500', Y: 'none' });
+});

@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.11.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.12.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -625,6 +625,30 @@ const Calc = {
   },
 
   /**
+   * Indice de comparaison le plus cohérent pour un titre, d'après son nom
+   * (un ETF « S&P 500 » se compare au S&P 500) puis le pays de son code ISIN
+   * (une action française se compare au CAC 40). Sans information : le monde.
+   * @returns {{key: string, why: string}}
+   */
+  suggestBenchmark(instrument) {
+    const name = String((instrument && instrument.name) || '').toLowerCase();
+    const isin = String((instrument && instrument.isin) || '').toUpperCase();
+    const byName = [
+      [/s&p ?500|sp ?500/, 'SP500'],
+      [/nasdaq/, 'NASDAQ100'],
+      [/emerg/, 'EMERGING'],
+      [/cac ?40/, 'CAC40'],
+      [/dax/, 'DAX'],
+      [/euro ?stoxx|stoxx ?(europe|50)|\beurope\b|\beuro\b/, 'STOXX50'],
+      [/world|monde|global/, 'MSCIWORLD'],
+    ].find(([re]) => re.test(name));
+    if (byName) return { key: byName[1], why: `le titre suit cet indice ou une zone proche (« ${instrument.name} »)` };
+    const country = { FR: 'CAC40', DE: 'DAX', US: 'SP500' }[isin.slice(0, 2)];
+    if (country) return { key: country, why: `action cotée dans le pays de cet indice (code ${isin.slice(0, 2)})` };
+    return { key: 'MSCIWORLD', why: 'titre non identifié : le marché mondial sert de repère général' };
+  },
+
+  /**
    * « Et si j'avais mis les mêmes sommes dans l'indice ? » : chaque achat est
    * rejoué sur l'indice au même jour et pour le même montant (hors frais).
    * Renvoie [{date, pct}] sur les jours de cotation de l'indice, ou [] sans historique.
@@ -701,7 +725,7 @@ const Store = {
       moves: [],                // autres mouvements d'argent [{id, date, amount, kind: 'retrait' | 'credit' | 'frais'}]
       prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
-      settings: { autoRefresh: true, benchmark: '' }, // benchmark : indice de comparaison (clé de BENCHMARK_LABELS) ; actualisation auto des cours 1×/jour à l'ouverture
+      settings: { autoRefresh: true, benchmark: '', benchmarks: {} }, // benchmark : indice de comparaison (clé de BENCHMARK_LABELS) ; actualisation auto des cours 1×/jour à l'ouverture
       lastAutoRefresh: null,    // date de la dernière actualisation automatique
       sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, growth: 0, inflation: 2, target: 100000, useReal: true, mode: 'projection' }, // useReal : partir de mes vrais chiffres ; mode : projection | objectif
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
@@ -878,7 +902,9 @@ const Store = {
         instruments,
         settings: {
           autoRefresh: !(data.settings && data.settings.autoRefresh === false),
-          benchmark: data.settings && Object.prototype.hasOwnProperty.call(BENCHMARK_LABELS, data.settings.benchmark) ? data.settings.benchmark : '',
+          benchmark: data.settings && (data.settings.benchmark === 'none' || Object.prototype.hasOwnProperty.call(BENCHMARKS, data.settings.benchmark)) ? data.settings.benchmark : '',
+          benchmarks: Object.fromEntries(Object.entries((data.settings && data.settings.benchmarks) || {})
+            .filter(([t, v]) => typeof t === 'string' && t.length <= 20 && (v === 'none' || Object.prototype.hasOwnProperty.call(BENCHMARKS, v)))),
         },
         lastAutoRefresh: Dates.isValidISO(data.lastAutoRefresh) ? data.lastAutoRefresh : null,
         sim,
@@ -953,13 +979,21 @@ function parsePricesFile(json) {
   return { quotes, histories, benchmarks, updatedAt: json.updatedAt || null };
 }
 
-/** Indices proposés pour la comparaison (clé = celle de data/prices.json). */
-const BENCHMARK_LABELS = {
-  CAC40: 'CAC 40',
-  STOXX50: 'Euro Stoxx 50',
-  MSCIWORLD: 'MSCI World',
-  SP500: 'S&P 500 (en $)',
+/**
+ * Indices proposés pour la comparaison (clé = celle de data/prices.json).
+ * ccy : devise de l'indice ; dividendes : l'indice les réinvestit-il ?
+ * (les indices « prix » comme le CAC 40 ne les comptent pas).
+ */
+const BENCHMARKS = {
+  CAC40: { label: 'CAC 40', ccy: 'EUR', dividendes: false },
+  STOXX50: { label: 'Euro Stoxx 50', ccy: 'EUR', dividendes: false },
+  DAX: { label: 'DAX (Allemagne)', ccy: 'EUR', dividendes: true },
+  SP500: { label: 'S&P 500 (États-Unis)', ccy: 'USD', dividendes: false },
+  NASDAQ100: { label: 'Nasdaq 100 (techno US)', ccy: 'USD', dividendes: false },
+  MSCIWORLD: { label: 'MSCI World (monde)', ccy: 'EUR', dividendes: true },
+  EMERGING: { label: 'MSCI Émergents', ccy: 'EUR', dividendes: true },
 };
+const BENCHMARK_LABELS = Object.fromEntries(Object.entries(BENCHMARKS).map(([k, v]) => [k, v.label]));
 
 const PriceProviders = {
   manual: {
@@ -1717,6 +1751,7 @@ const App = {
         </div>
         <div class="perf-box">
           <p class="label">Ma performance</p>
+          <label class="bench-pick">Comparer à <select data-f="bench-pick"></select></label>
           <div class="chart chart-small" data-f="perf" role="img"></div>
           <p class="hint bench-note" data-f="perf-bench" hidden></p>
           <p class="hint" data-f="perf-hint" hidden></p>
@@ -2031,17 +2066,16 @@ const App = {
    * comme la carte du titre), jour par jour depuis le premier achat.
    * Un graphique par titre + un pour le total.
    */
-  perfChartOpts(ps, ariaLabel, purchases = null) {
+  perfChartOpts(ps, ariaLabel, purchases = null, key = null) {
     const up = ps[ps.length - 1].pct >= 0;
     const color = up ? '--good' : '--bad';
     const series = [{ name: 'Performance', color, values: ps.map((p) => p.pct), area: true, split: true }];
     // Comparaison : mêmes sommes placées dans l'indice choisi
-    const key = App.state.settings.benchmark;
     let bench = null;
-    if (key && purchases && App.benchmarks[key]) {
+    if (key && BENCHMARKS[key] && purchases && App.benchmarks[key]) {
       const bs = Calc.benchmarkSeries(purchases, App.benchmarks[key]);
       if (bs.length) {
-        bench = { label: BENCHMARK_LABELS[key] || key, pcts: Calc.alignPct(bs, ps.map((p) => p.date)) };
+        bench = { key, label: BENCHMARKS[key].label.split(' (')[0], pcts: Calc.alignPct(bs, ps.map((p) => p.date)) };
         series.push({ name: bench.label, color: '--series-invested', values: bench.pcts, dash: true });
       }
     }
@@ -2074,6 +2108,46 @@ const App = {
     };
   },
 
+  /** Indice choisi pour un titre : choix de l'utilisateur, sinon indice suggéré ; null = aucun. */
+  benchFor(ticker) {
+    const pick = (App.state.settings.benchmarks || {})[ticker];
+    if (pick === 'none') return { key: null };
+    if (pick && BENCHMARKS[pick]) return { key: pick, why: 'choisi par vous' };
+    return Calc.suggestBenchmark(App.state.instruments[ticker]);
+  },
+
+  /** Indice du portefeuille entier : choix, sinon l'indice commun à tous les titres, sinon le monde. */
+  benchForTotal() {
+    const pick = App.state.settings.benchmark;
+    if (pick === 'none') return { key: null };
+    if (pick && BENCHMARKS[pick]) return { key: pick, why: 'choisi par vous' };
+    const keys = [...new Set(Calc.portfolio(App.lots()).positions.map((p) => App.benchFor(p.ticker).key))];
+    return keys.length === 1 && keys[0]
+      ? { key: keys[0], why: 'tous vos titres suivent ce marché' }
+      : { key: 'MSCIWORLD', why: 'vos titres sont sur des marchés différents : le monde sert de repère général' };
+  },
+
+  /** Pièges de la comparaison (devise, dividendes), en clair. */
+  benchCaveats(key, tickers) {
+    const b = BENCHMARKS[key];
+    if (!b) return [];
+    const out = [];
+    const names = tickers.map((t) => String((App.state.instruments[t] || {}).name || ''));
+    if (b.ccy === 'USD') out.push('Cet indice est en dollars : l\'écart avec un titre en euros contient aussi l\'effet du change.');
+    if (!b.dividendes && names.some((n) => /\bacc\b/i.test(n))) out.push('Cet indice ne compte pas les dividendes, alors que votre ETF à capitalisation (Acc) les réinvestit : il part avec un léger avantage (environ 1 à 3 % par an).');
+    return out;
+  },
+
+  /** Remplit un menu « Comparer à ». */
+  fillBenchSelect(sel, value, autoKey) {
+    sel.replaceChildren();
+    const add = (v, t) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); };
+    add('', `Automatique${autoKey ? ' : ' + BENCHMARKS[autoKey].label.split(' (')[0] : ''}`);
+    add('none', 'Aucun indice');
+    for (const [k, v] of Object.entries(BENCHMARKS)) add(k, v.label);
+    sel.value = value || '';
+  },
+
   /** Phrase « vs indice » : écart final en points de pourcentage. */
   benchVerdict(ps, bench) {
     const last = ps.length - 1;
@@ -2081,7 +2155,7 @@ const App = {
     if (b == null) return '';
     const gap = (ps[last].pct - b) * 100;
     const g = Math.abs(gap).toFixed(2).replace('.', ',');
-    return `${bench.label} : ${Fmt.signedPct(b)} · ${gap >= 0 ? `+${g}` : `−${g}`} pt ${gap >= 0 ? 'devant' : 'derrière'} l'indice`;
+    return `${bench.label} : ${Fmt.signedPct(b)} · ${gap >= 0 ? `+${g}` : `−${g}`} pt ${gap >= 0 ? 'devant' : 'derrière'} l'indice.`;
   },
 
   renderPerfCharts() {
@@ -2103,11 +2177,24 @@ const App = {
           : 'Touchez « Actualiser le cours » pour charger l\'historique et afficher la courbe.';
         return;
       }
-      const o = App.perfChartOpts(ps, null, purchases.filter((p) => Calc.normTicker(p.ticker) === ticker));
+      const sel = el.parentElement.querySelector('[data-f=bench-pick]');
+      const auto = Calc.suggestBenchmark(App.state.instruments[ticker]);
+      App.fillBenchSelect(sel, (App.state.settings.benchmarks || {})[ticker], auto.key);
+      sel.onchange = () => {
+        App.state.settings.benchmarks = { ...(App.state.settings.benchmarks || {}), [ticker]: sel.value };
+        App.persist();
+        App.renderPerfCharts();
+      };
+      const bf = App.benchFor(ticker);
+      const o = App.perfChartOpts(ps, null, purchases.filter((p) => Calc.normTicker(p.ticker) === ticker), bf.key);
       el.setAttribute('aria-label', `Performance de ${ticker} depuis le premier achat`);
       drawChart(el, o);
       const note = el.parentElement.querySelector('[data-f=perf-bench]');
-      if (note) { note.textContent = App.benchVerdict(ps, o.bench); note.hidden = !note.textContent; }
+      if (note) {
+        const lines = o.bench ? [App.benchVerdict(ps, o.bench), `Pourquoi cet indice : ${bf.why}.`, ...App.benchCaveats(bf.key, [ticker])] : [];
+        note.textContent = lines.join(' ');
+        note.hidden = !lines.length;
+      }
     });
 
     // Total du portefeuille
@@ -2126,11 +2213,16 @@ const App = {
     const last = ps[ps.length - 1];
     document.getElementById('chart-perf-now').textContent = `${Fmt.signedPct(last.pct)} · ${Fmt.signedEur(last.pv)}`;
     document.getElementById('chart-perf-now').className = 'perf-now ' + Fmt.trend(last.pv);
-    const o = App.perfChartOpts(ps, null, purchases);
+    const bt = App.benchForTotal();
+    const sel = document.getElementById('bench-select');
+    App.fillBenchSelect(sel, App.state.settings.benchmark, bt.key);
+    const o = App.perfChartOpts(ps, null, purchases, bt.key);
     drawChart(el, o);
     const note = document.getElementById('chart-perf-bench');
-    note.textContent = App.benchVerdict(ps, o.bench);
-    note.hidden = !note.textContent;
+    const tickers = [...new Set(purchases.map((p) => Calc.normTicker(p.ticker)))];
+    const lines = o.bench ? [App.benchVerdict(ps, o.bench), `Pourquoi cet indice : ${bt.why}.`, ...App.benchCaveats(bt.key, tickers)] : [];
+    note.textContent = lines.join(' ');
+    note.hidden = !lines.length;
   },
 
   /* ---------- Achats ---------- */
@@ -2927,10 +3019,8 @@ const App = {
 
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
     document.getElementById('import-file').addEventListener('change', App.importJSON);
-    const pick = document.getElementById('bench-select');
-    pick.value = App.state.settings.benchmark || '';
-    pick.addEventListener('change', () => {
-      App.state.settings.benchmark = pick.value;
+    document.getElementById('bench-select').addEventListener('change', (e) => {
+      App.state.settings.benchmark = e.target.value;
       App.persist();
       App.renderPerfCharts();
     });
@@ -3083,7 +3173,6 @@ const App = {
         App.bindSimulatorValues();
         App.fillPlannerValues();
         document.getElementById('set-autorefresh').checked = data.settings.autoRefresh;
-        document.getElementById('bench-select').value = data.settings.benchmark || '';
         App.liveStatus = {};
         App.renderAll();
         App.toast('Sauvegarde importée');
@@ -3106,5 +3195,5 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', App.init);
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { Calc, Dates, Fmt, Store, PEA_CEILING, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls, Euronext, QuoteError };
+  module.exports = { BENCHMARKS, Calc, Dates, Fmt, Store, PEA_CEILING, APP_VERSION, parsePricesFile, mergeQuotes, priceUrls, Euronext, QuoteError };
 }

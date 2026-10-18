@@ -18,6 +18,9 @@ const BENCHMARKS = {
   STOXX50: '^STOXX50E',  // Euro Stoxx 50
   MSCIWORLD: 'EWLD.PA',  // ETF MSCI World en euros (capitalisation)
   SP500: '^GSPC',        // S&P 500 (en dollars)
+  NASDAQ100: '^NDX',     // Nasdaq 100 (en dollars)
+  DAX: '^GDAXI',         // DAX allemand (dividendes réinvestis)
+  EMERGING: 'AEEM.PA',   // ETF MSCI Émergents en euros (capitalisation)
 };
 const RANGE = '5y';           // profondeur d'historique
 const OUT = path.join(__dirname, '..', 'data', 'prices.json');
