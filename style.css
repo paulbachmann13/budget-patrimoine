@@ -595,3 +595,5 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .alloc-row b { font-variant-numeric: tabular-nums; font-weight: 600; }
 .alloc-bar { height: 8px; border-radius: 4px; background: var(--muted); background: color-mix(in srgb, var(--muted) 25%, transparent); overflow: hidden; }
 .alloc-bar i { display: block; height: 100%; background: var(--series-invested); border-radius: 4px; }
+
+.fees-total { margin: 0 0 4px; font-size: 18px; font-weight: 700; }

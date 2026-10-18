@@ -776,3 +776,15 @@ test('répartition : par titre et par zone, alerte sur une action trop lourde', 
   assert.equal(Calc.allocation(pos.slice(0, 1), ins).alerts.length, 1); // un seul ETF non « Monde »
   assert.deepEqual(Calc.allocation([], {}).byTicker, []);
 });
+
+test('frais : courtage, ventes et frais prélevés par année', () => {
+  const buys = [{ date: '2025-12-01', qty: 10, price: 10, fees: 1 }, { date: '2026-01-05', qty: 10, price: 10, fees: 1.5 }];
+  const sells = [{ date: '2026-02-01', qty: 5, price: 11, fees: 2 }];
+  const moves = [{ date: '2026-03-01', amount: 3, kind: 'frais' }, { date: '2026-03-02', amount: 9, kind: 'credit' }];
+  const f = Calc.feesSummary(buys, sells, moves);
+  assert.equal(f.total, 7.5);
+  assert.equal(f.courtage, 2.5);
+  assert.equal(f.vente, 2);
+  assert.equal(f.prelevements, 3);
+  assert.deepEqual(f.byYear, { 2025: 1, 2026: 6.5 });
+});
