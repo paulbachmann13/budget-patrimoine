@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.15.0">
+  <link rel="stylesheet" href="style.css?v=2.16.0">
 </head>
 <body>
   <header class="topbar">
@@ -434,6 +434,14 @@
         <p class="hint" id="real-chart-hint" hidden>La courbe s'affiche pour les titres dont l'historique est publié chaque soir (DCAM).</p>
       </div>
 
+      <!-- Et si le marché baissait ? -->
+      <div class="card" id="scenarios" hidden>
+        <h2 class="card-title">Et si le marché baissait ?</h2>
+        <p class="hint" id="scenarios-intro" style="margin-top:0"></p>
+        <div class="whatif-table sim-table scenarios-table" id="scenarios-table"></div>
+        <p class="hint">Repères passés (ordre de grandeur, sur de grands indices actions) : krach de 2020 ≈ −34 % en un mois, retrouvé en environ 5 mois ; 2022 ≈ −25 % ; 2008-2009 ≈ −50 % ; 2000-2002 ≈ −45 %, plusieurs années pour revenir. Continuer à verser pendant la baisse permet d'acheter moins cher.</p>
+      </div>
+
       <form id="sim-form" class="card form sim" autocomplete="off">
         <div class="seg" role="group" aria-label="Type de simulation">
           <button type="button" data-mode="projection">Projection</button>
@@ -775,9 +783,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.15.0"></script>
-  <script src="app.js?v=2.15.0"></script>
-  <script src="sync.js?v=2.15.0"></script>
-  <script src="lock.js?v=2.15.0"></script>
+  <script src="budget.js?v=2.16.0"></script>
+  <script src="app.js?v=2.16.0"></script>
+  <script src="sync.js?v=2.16.0"></script>
+  <script src="lock.js?v=2.16.0"></script>
 </body>
 </html>
