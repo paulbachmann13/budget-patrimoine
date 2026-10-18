@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.12.0">
+  <link rel="stylesheet" href="style.css?v=2.13.0">
 </head>
 <body>
   <header class="topbar">
@@ -538,10 +538,14 @@
         <label>Type
           <select name="kind">
             <option value="versement">Versement</option>
+            <option value="dividende">Dividende reçu</option>
             <option value="credit">Régularisation / crédit</option>
             <option value="frais">Frais prélevés</option>
             <option value="retrait">Retrait</option>
           </select>
+        </label>
+        <label id="deposit-ticker-label" hidden>Titre concerné
+          <select name="ticker"></select>
         </label>
         <div class="row">
           <label>Date
@@ -555,6 +559,7 @@
         <p class="error" id="deposit-error" hidden></p>
         <button type="submit" class="btn btn-primary">+ Ajouter</button>
         <p class="hint" id="cash-summary"></p>
+        <p class="hint" id="dividend-summary" hidden></p>
         <div id="deposit-list" class="stack"></div>
       </form>
 
@@ -764,9 +769,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.12.0"></script>
-  <script src="app.js?v=2.12.0"></script>
-  <script src="sync.js?v=2.12.0"></script>
-  <script src="lock.js?v=2.12.0"></script>
+  <script src="budget.js?v=2.13.0"></script>
+  <script src="app.js?v=2.13.0"></script>
+  <script src="sync.js?v=2.13.0"></script>
+  <script src="lock.js?v=2.13.0"></script>
 </body>
 </html>
