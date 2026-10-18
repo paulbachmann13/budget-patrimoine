@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.18.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.18.2'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -1813,6 +1813,21 @@ const App = {
   cmp: { a: '', b: '', period: 'max' },
   CMP_PERIODS: { '1m': ['1 mois', 1], '3m': ['3 mois', 3], '6m': ['6 mois', 6], '1a': ['1 an', 12], max: ['Tout', 0] },
 
+  /** Légende : un trait de la couleur de la courbe + son nom. items = [{label, color (variable CSS) | css, dash}] */
+  fillLegend(el, items) {
+    el.replaceChildren();
+    el.hidden = !items.length;
+    for (const it of items) {
+      const span = document.createElement('span');
+      const key = document.createElement('i');
+      key.className = 'key-line';
+      const col = it.css || `var(${it.color})`;
+      key.style.background = it.dash ? `repeating-linear-gradient(90deg, ${col} 0 4px, transparent 4px 7px)` : col;
+      span.append(key, document.createTextNode(it.label));
+      el.appendChild(span);
+    }
+  },
+
   extendTried: new Set(),
 
   /**
@@ -1900,6 +1915,10 @@ const App = {
     }
     const nameA = A.ticker || BENCHMARKS[A.key].label.split(' (')[0];
     const nameB = B.ticker || BENCHMARKS[B.key].label.split(' (')[0];
+    App.fillLegend(document.getElementById('cmp-legend'), [
+      { label: nameA, color: '--series-invested' },
+      { label: nameB, color: '--series-rate' },
+    ]);
     drawChart(el, {
       signed: true,
       xs: cs.dates.map((d) => Dates.parse(d).getTime()),
@@ -2172,6 +2191,7 @@ const App = {
         <div class="perf-box">
           <p class="label">Ma performance</p>
           <label class="bench-pick">Comparer à <select data-f="bench-pick"></select></label>
+          <div class="legend" data-f="perf-legend" hidden></div>
           <div class="chart chart-small" data-f="perf" role="img"></div>
           <p class="hint bench-note" data-f="perf-bench" hidden></p>
           <p class="hint" data-f="perf-hint" hidden></p>
@@ -2599,6 +2619,7 @@ const App = {
       el.hidden = ps.length < 2;
       hint.hidden = ps.length >= 2;
       if (ps.length < 2) {
+        el.parentElement.querySelector('[data-f=perf-legend]').hidden = true;
         el.replaceChildren();
         hint.textContent = App.histories[ticker] && App.histories[ticker].length
           ? 'La courbe apparaît à partir du 2e jour de cotation après votre premier achat.'
@@ -2617,6 +2638,10 @@ const App = {
       const o = App.perfChartOpts(ps, null, purchases.filter((p) => Calc.normTicker(p.ticker) === ticker), bf.key);
       el.setAttribute('aria-label', `Performance de ${ticker} depuis le premier achat`);
       drawChart(el, o);
+      App.fillLegend(el.parentElement.querySelector('[data-f=perf-legend]'), o.bench ? [
+        { label: 'Ma performance', css: 'linear-gradient(90deg, var(--good) 50%, var(--bad) 50%)' },
+        { label: o.bench.label, color: '--series-invested', dash: true },
+      ] : []);
       const note = el.parentElement.querySelector('[data-f=perf-bench]');
       if (note) {
         const lines = o.bench ? [App.benchVerdict(ps, o.bench), `Pourquoi cet indice : ${bf.why}.`, ...App.benchCaveats(bf.key, [ticker])] : [];
@@ -2633,6 +2658,7 @@ const App = {
     el.hidden = ps.length < 2;
     hint.hidden = ps.length >= 2 || !purchases.length;
     document.getElementById('chart-perf-bench').hidden = true;
+    document.getElementById('chart-perf-legend').hidden = true;
     if (ps.length < 2) {
       el.replaceChildren();
       hint.textContent = 'Actualisez les cours de chaque titre pour charger leur historique : la courbe s\'affichera ensuite.';
@@ -2646,6 +2672,10 @@ const App = {
     App.fillBenchSelect(sel, App.state.settings.benchmark, bt.key);
     const o = App.perfChartOpts(ps, null, purchases, bt.key);
     drawChart(el, o);
+    App.fillLegend(document.getElementById('chart-perf-legend'), o.bench ? [
+      { label: 'Ma performance', css: 'linear-gradient(90deg, var(--good) 50%, var(--bad) 50%)' },
+      { label: o.bench.label, color: '--series-invested', dash: true },
+    ] : []);
     const note = document.getElementById('chart-perf-bench');
     const tickers = [...new Set(purchases.map((p) => Calc.normTicker(p.ticker)))];
     const lines = o.bench ? [App.benchVerdict(ps, o.bench), `Pourquoi cet indice : ${bt.why}.`, ...App.benchCaveats(bt.key, tickers)] : [];
