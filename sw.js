@@ -8,7 +8,7 @@
    - Cours (data/*.json) : réseau d'abord, cache si hors ligne.
    Pensez à incrémenter VERSION (ici, dans app.js et les ?v= d'index.html) à chaque modification.
    ========================================================================== */
-const VERSION = '2.18.0'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
+const VERSION = '2.18.1'; // garder identique à APP_VERSION dans app.js (vérifié par les tests)
 const CACHE = 'budget-patrimoine-v' + VERSION;
 
 // Chemins relatifs : fonctionne aussi sous https://<user>.github.io/<depot>/
