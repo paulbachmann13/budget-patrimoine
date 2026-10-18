@@ -788,3 +788,15 @@ test('frais : courtage, ventes et frais prélevés par année', () => {
   assert.equal(f.prelevements, 3);
   assert.deepEqual(f.byYear, { 2025: 1, 2026: 6.5 });
 });
+
+test('scénarios de baisse : valeur restante et temps pour revenir', () => {
+  const rows = Calc.stressTest({ value: 1000, drops: [0.2], monthly: 0, annualRate: 0 });
+  assert.equal(rows[0].after, 800);
+  assert.equal(rows[0].loss, 200);
+  assert.equal(rows[0].monthsWithout, null); // 0 % de rendement et aucun versement : jamais
+  const r = Calc.stressTest({ value: 1000, drops: [0.2], monthly: 50, annualRate: 0 })[0];
+  assert.equal(r.monthsWith, 4); // 4 × 50 € = les 200 € perdus
+  const g = Calc.stressTest({ value: 1000, drops: [0.5], monthly: 0, annualRate: 7 })[0];
+  assert.ok(g.monthsWithout > 120 && g.monthsWithout < 130); // doubler à 7 % ≈ 10,2 ans
+  assert.deepEqual(Calc.stressTest({ value: 0 }), []);
+});

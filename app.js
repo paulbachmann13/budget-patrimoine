@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.15.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.16.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -672,6 +672,29 @@ const Calc = {
     const country = { FR: 'CAC40', DE: 'DAX', US: 'SP500' }[isin.slice(0, 2)];
     if (country) return { key: country, why: `action cotée dans le pays de cet indice (code ${isin.slice(0, 2)})` };
     return { key: 'MSCIWORLD', why: 'titre non identifié : le marché mondial sert de repère général' };
+  },
+
+  /**
+   * Scénarios de baisse du marché : pour chaque baisse, ce qui reste, la perte,
+   * et le temps pour retrouver la valeur d'avant — en continuant les versements
+   * mensuels, et sans verser. Rendement annuel supposé après la baisse (annualRate, en %).
+   * @returns [{drop, after, loss, monthsWith, monthsWithout}] (mois, null si > 50 ans)
+   */
+  stressTest({ value, drops = [0.1, 0.2, 0.3, 0.4], monthly = 0, annualRate = 5 }) {
+    const i = Math.pow(1 + annualRate / 100, 1 / 12) - 1;
+    const recover = (start, contrib) => {
+      let v = start;
+      for (let m = 1; m <= 600; m++) {
+        v = v * (1 + i) + contrib;
+        if (v >= value) return m;
+      }
+      return null;
+    };
+    if (!(value > 0)) return [];
+    return drops.map((drop) => {
+      const after = value * (1 - drop);
+      return { drop, after, loss: value - after, monthsWith: recover(after, monthly), monthsWithout: recover(after, 0) };
+    });
   },
 
   /**
@@ -1714,6 +1737,40 @@ const App = {
     App.renderPea();
     App.renderCharts();
     Budget.renderPatrimoine();
+  },
+
+  /** Durée en mois → texte (« 8 mois », « 2 ans et 3 mois »). */
+  monthsText(m) {
+    if (m === null) return 'plus de 50 ans';
+    if (m < 12) return `${m} mois`;
+    const y = Math.floor(m / 12); const r = m % 12;
+    return `${y} an${y > 1 ? 's' : ''}${r ? ` et ${r} mois` : ''}`;
+  },
+
+  /** « Et si le marché baissait ? » sur le vrai portefeuille. */
+  renderScenarios() {
+    const card = document.getElementById('scenarios');
+    const real = App.realInputs();
+    const value = real ? real.initial : Calc.portfolio(App.lots(), App.state.prices).value;
+    card.hidden = !(value > 0);
+    if (card.hidden) return;
+    const monthly = real ? real.monthly : App.state.sim.monthly;
+    const rate = App.state.sim.rate;
+    const rows = Calc.stressTest({ value, monthly, annualRate: rate });
+    document.getElementById('scenarios-intro').textContent =
+      `Votre PEA vaut ${Fmt.eur0(value)}. Que se passe-t-il s'il baisse d'un coup ? Temps pour retrouver ce niveau, avec ${Fmt.eur0(monthly)} versés par mois, puis sans verser, si le marché rapporte ${Fmt.num(rate)} % par an ensuite.`;
+    const table = document.getElementById('scenarios-table');
+    table.replaceChildren();
+    const addRow = (cells, cls) => {
+      const row = document.createElement('div');
+      if (cls) row.className = cls;
+      for (const c of cells) { const span = document.createElement(cls === 'head' ? 'strong' : 'span'); span.textContent = c; row.appendChild(span); }
+      table.appendChild(row);
+    };
+    addRow(['Baisse', 'Il reste', 'Retour (je verse)', 'Retour (sans verser)'], 'head');
+    for (const r of rows) {
+      addRow([`−${Math.round(r.drop * 100)} %`, Fmt.eur0(r.after), App.monthsText(r.monthsWith), App.monthsText(r.monthsWithout)]);
+    }
   },
 
   /** Frais cumulés et poids sur ce qui a été investi. */
@@ -2873,6 +2930,7 @@ const App = {
   },
 
   renderSimulator() {
+    App.renderScenarios();
     App.fillRealFields();
     App.renderRealCompare();
     const s = App.state.sim;
