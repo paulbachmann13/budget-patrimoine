@@ -17,7 +17,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
   <!-- ?v= : nouvelle adresse à chaque version, pour ne jamais mélanger index.html et app.js de versions différentes (cache de GitHub Pages) -->
-  <link rel="stylesheet" href="style.css?v=2.17.0">
+  <link rel="stylesheet" href="style.css?v=2.18.0">
 </head>
 <body>
   <header class="topbar">
@@ -371,6 +371,24 @@
 
       <h2 id="fees-title" hidden>Frais</h2>
       <div class="card" id="fees" hidden></div>
+
+      <h2 id="compare-title" hidden>Comparer deux titres</h2>
+      <div class="card chart-card" id="compare-card" hidden>
+        <div class="cmp-pick">
+          <select id="cmp-a" aria-label="Premier titre"></select>
+          <span>contre</span>
+          <select id="cmp-b" aria-label="Second titre"></select>
+        </div>
+        <div class="chips" id="cmp-periods" role="group" aria-label="Période">
+          <button type="button" class="chip" data-p="1m">1 mois</button>
+          <button type="button" class="chip" data-p="3m">3 mois</button>
+          <button type="button" class="chip" data-p="6m">6 mois</button>
+          <button type="button" class="chip" data-p="1a">1 an</button>
+          <button type="button" class="chip" data-p="max">Tout</button>
+        </div>
+        <div id="chart-compare" class="chart" role="img" aria-label="Comparaison de la performance de deux titres sur la même période"></div>
+        <p class="hint bench-note" id="cmp-note"></p>
+      </div>
 
       <h2 id="calendar-title" hidden>Calendrier de versements</h2>
       <div class="card" id="calendar" hidden>
@@ -793,9 +811,9 @@
   <div id="tooltip" class="tooltip" hidden></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="budget.js?v=2.17.0"></script>
-  <script src="app.js?v=2.17.0"></script>
-  <script src="sync.js?v=2.17.0"></script>
-  <script src="lock.js?v=2.17.0"></script>
+  <script src="budget.js?v=2.18.0"></script>
+  <script src="app.js?v=2.18.0"></script>
+  <script src="sync.js?v=2.18.0"></script>
+  <script src="lock.js?v=2.18.0"></script>
 </body>
 </html>
