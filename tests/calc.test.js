@@ -800,3 +800,23 @@ test('scénarios de baisse : valeur restante et temps pour revenir', () => {
   assert.ok(g.monthsWithout > 120 && g.monthsWithout < 130); // doubler à 7 % ≈ 10,2 ans
   assert.deepEqual(Calc.stressTest({ value: 0 }), []);
 });
+
+test('calendrier de versements : mois, objectif, série et mois en cours', () => {
+  const buys = [
+    { date: '2026-07-10', qty: 1, price: 100, fees: 0 },
+    { date: '2026-08-12', qty: 1, price: 60, fees: 0 },
+    { date: '2026-10-02', qty: 1, price: 100, fees: 0 },
+  ];
+  const c = Calc.monthlyCalendar(buys, 100, '2026-10-18');
+  assert.deepEqual(c.months.map((m) => m.status), ['ok', 'partial', 'none', 'ok']);
+  assert.equal(c.streak, 1);
+  assert.equal(c.done, 2);
+  assert.equal(c.total, 4);
+  // mois en cours sans achat : en attente, la série du mois précédent continue
+  const p = Calc.monthlyCalendar(buys.slice(0, 2), 0, '2026-09-05');
+  assert.deepEqual(p.months.map((m) => m.status), ['ok', 'ok', 'pending']);
+  assert.equal(p.streak, 2);
+  assert.deepEqual(Calc.monthlyCalendar([], 0).months, []);
+  // passage d'année
+  assert.equal(Calc.monthlyCalendar([{ date: '2025-11-03', qty: 1, price: 1, fees: 0 }], 0, '2026-02-01').months.length, 4);
+});
