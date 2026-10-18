@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.13.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.14.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -672,6 +672,35 @@ const Calc = {
     const country = { FR: 'CAC40', DE: 'DAX', US: 'SP500' }[isin.slice(0, 2)];
     if (country) return { key: country, why: `action cotée dans le pays de cet indice (code ${isin.slice(0, 2)})` };
     return { key: 'MSCIWORLD', why: 'titre non identifié : le marché mondial sert de repère général' };
+  },
+
+  /**
+   * Répartition du portefeuille : par titre et par zone géographique (déduite
+   * du nom et de l'ISIN), liquidités à part, et alertes de concentration.
+   * La concentration ne vise que les actions seules : un ETF est déjà un panier.
+   * @param positions  Calc.portfolio(...).positions
+   * @param instruments { TICKER: {name, isin} }
+   * @param cash liquidités du PEA (null si inconnues)
+   */
+  allocation(positions, instruments = {}, cash = null) {
+    const ZONES = { SP500: 'États-Unis', NASDAQ100: 'États-Unis', MSCIWORLD: 'Monde', STOXX50: 'Europe', CAC40: 'France', DAX: 'Allemagne', EMERGING: 'Marchés émergents' };
+    const held = positions.filter((p) => p.value > 0);
+    const invested = held.reduce((s, p) => s + p.value, 0);
+    const total = invested + (cash > 0 ? cash : 0);
+    const isEtf = (ins) => /\b(etf|ucits|acc|dist)\b|amundi|lyxor|ishares|xtrackers/i.test(String((ins && ins.name) || ''));
+    const byTicker = held.map((p) => {
+      const ins = instruments[p.ticker];
+      return { ticker: p.ticker, name: (ins && ins.name) || p.ticker, value: p.value, share: total > 0 ? p.value / total : 0, etf: isEtf(ins), zone: ZONES[Calc.suggestBenchmark(ins).key] };
+    }).sort((a, b) => b.value - a.value);
+    const zoneMap = {};
+    for (const t of byTicker) zoneMap[t.zone] = (zoneMap[t.zone] || 0) + t.value;
+    const byZone = Object.entries(zoneMap).map(([zone, value]) => ({ zone, value, share: total > 0 ? value / total : 0 })).sort((a, b) => b.value - a.value);
+    const alerts = [];
+    for (const t of byTicker) {
+      if (!t.etf && t.share > 0.2) alerts.push(`${t.ticker} pèse ${Math.round(t.share * 100)} % du portefeuille : une action seule est risquée au-delà d'environ 20 %.`);
+    }
+    if (byTicker.length === 1 && byTicker[0].etf && byTicker[0].zone !== 'Monde') alerts.push(`Tout est sur un seul ETF (${byTicker[0].zone}) : un ETF Monde répartit sur davantage de pays.`);
+    return { total, invested, cash: cash > 0 ? cash : 0, cashShare: total > 0 && cash > 0 ? cash / total : 0, byTicker, byZone, alerts };
   },
 
   /**
@@ -1670,7 +1699,40 @@ const App = {
     Budget.renderPatrimoine();
   },
 
+  /** Répartition : barres par titre et par zone. */
+  renderAllocation() {
+    const card = document.getElementById('allocation');
+    const c = App.cashInfo();
+    const pf = Calc.portfolio(App.lots(), App.state.prices);
+    const a = Calc.allocation(pf.positions, App.state.instruments, c.hasDeposits ? c.cash : null);
+    card.replaceChildren();
+    document.getElementById('allocation-title').hidden = card.hidden = !a.byTicker.length;
+    if (!a.byTicker.length) return;
+    const section = (title, rows) => {
+      const h = document.createElement('p'); h.className = 'label'; h.textContent = title; card.appendChild(h);
+      for (const r of rows) {
+        const row = document.createElement('div'); row.className = 'alloc-row';
+        const name = document.createElement('span'); name.textContent = r.label;
+        const bar = document.createElement('div'); bar.className = 'alloc-bar';
+        const fill = document.createElement('i'); fill.style.width = Math.max(r.share * 100, 1) + '%';
+        bar.appendChild(fill);
+        const val = document.createElement('b'); val.textContent = `${Fmt.pct(r.share)} · ${Fmt.eur0(r.value)}`;
+        row.append(name, bar, val);
+        card.appendChild(row);
+      }
+    };
+    const titles = a.byTicker.map((t) => ({ label: t.ticker, share: t.share, value: t.value }));
+    if (a.cash > 0) titles.push({ label: 'Liquidités', share: a.cashShare, value: a.cash });
+    section('Par titre', titles);
+    section('Par zone', a.byZone.map((z) => ({ label: z.zone, share: z.share, value: z.value })));
+    const notes = [...a.alerts];
+    if (a.byZone.some((z) => z.zone === 'Monde')) notes.push('Un ETF Monde est déjà diversifié, mais composé surtout d\'actions américaines.');
+    notes.push('La zone est déduite du nom du titre ; elle ne dit rien du secteur d\'activité.');
+    for (const n of notes) { const p = document.createElement('p'); p.className = 'hint'; p.textContent = n; card.appendChild(p); }
+  },
+
   renderCharts() {
+    App.renderAllocation();
     App.renderCumulChart();
     App.renderPerfCharts();
     App.renderSimChart();
