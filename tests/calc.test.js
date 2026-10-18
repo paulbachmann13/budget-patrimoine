@@ -739,3 +739,25 @@ test('réglages : un indice par titre, valeurs inconnues ignorées', () => {
   assert.equal(s.settings.benchmark, 'none');
   assert.deepEqual(s.settings.benchmarks, { PSP5: 'SP500', Y: 'none' });
 });
+
+test('dividendes : cash en plus, hors plafond, comptés dans la performance', () => {
+  const buys = [{ id: 'a', date: '2026-01-05', ticker: 'ORA', qty: 100, price: 10, fees: 0 }];
+  const hist = { ORA: [['2026-01-05', 10], ['2026-02-05', 10], ['2026-03-05', 9]] };
+  const moves = [{ id: 'm', date: '2026-02-20', amount: 50, kind: 'dividende', ticker: 'ora' }];
+  const d = Calc.deposits([{ id: 'd', date: '2026-01-01', amount: 1200 }], buys, [], moves);
+  assert.equal(d.dividends, 50);
+  assert.equal(d.base, 1200); // le plafond ne bouge pas
+  assert.equal(d.cash, 1200 - 1000 + 50);
+  const ps = Calc.performanceSeries(buys, hist, null, moves);
+  assert.equal(ps[1].div, 0);
+  close(ps[2].value, 900 + 50);
+  close(ps[2].pct, -0.05); // −100 € de cours + 50 € de dividende, sur 1 000 €
+  const sum = Calc.dividendSummary(moves);
+  assert.deepEqual(sum, { total: 50, byYear: { 2026: 50 }, byTicker: { ORA: 50 } });
+});
+
+test('import : un dividende exige un titre', () => {
+  const s = Store.sanitize({ purchases: [], moves: [{ id: 'x', date: '2026-03-01', amount: 12, kind: 'dividende', ticker: 'ora' }] });
+  assert.equal(s.moves[0].ticker, 'ORA');
+  assert.throws(() => Store.sanitize({ purchases: [], moves: [{ id: 'y', date: '2026-03-01', amount: 12, kind: 'dividende' }] }));
+});

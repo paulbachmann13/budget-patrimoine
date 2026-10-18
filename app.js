@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.12.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.13.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -505,13 +505,14 @@ const Calc = {
     const proceeds = Calc.trades(purchases, sales).realized.reduce((s, r) => s + r.proceeds, 0);
     const sum = (kind) => moves.filter((m) => m.kind === kind).reduce((s, m) => s + m.amount, 0);
     const credits = sum('credit'); const fees = sum('frais'); const withdrawals = sum('retrait');
+    const dividends = sum('dividende'); // du cash en plus, hors plafond
     return {
       hasDeposits,
       total,
       spent,
-      proceeds, credits, fees, withdrawals,
+      proceeds, credits, dividends, fees, withdrawals,
       base: hasDeposits ? total : spent, // montant compté pour le plafond (versements seulement)
-      cash: hasDeposits ? total + proceeds + credits - spent - fees - withdrawals : null,
+      cash: hasDeposits ? total + proceeds + credits + dividends - spent - fees - withdrawals : null,
     };
   },
 
@@ -613,15 +614,40 @@ const Calc = {
    * (alors chaque titre détenu doit avoir un historique, sinon []).
    * @returns [{date, gross, invested, value, pv, pct, pvNet, pctNet}]
    */
-  performanceSeries(purchases, histories, ticker = null) {
+  performanceSeries(purchases, histories, ticker = null, dividends = []) {
     const subset = ticker ? purchases.filter((p) => Calc.normTicker(p.ticker) === ticker) : purchases;
-    return Calc.valueSeries(subset, histories).map((pt) => ({
-      ...pt,
-      pv: pt.value - pt.gross,
-      pct: pt.gross > 0 ? (pt.value - pt.gross) / pt.gross : 0,
-      pvNet: pt.value - pt.invested,
-      pctNet: pt.invested > 0 ? (pt.value - pt.invested) / pt.invested : 0,
-    }));
+    // Dividendes encaissés : du cash qui s'ajoute à la valeur des parts, à partir de leur date de versement
+    const divs = dividends
+      .filter((d) => d.kind === 'dividende' && (!ticker || Calc.normTicker(d.ticker) === ticker))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    let di = 0; let cum = 0;
+    return Calc.valueSeries(subset, histories).map((pt) => {
+      while (di < divs.length && divs[di].date <= pt.date) cum += divs[di++].amount;
+      const value = pt.value + cum;
+      return {
+        ...pt,
+        value,
+        div: cum,
+        pv: value - pt.gross,
+        pct: pt.gross > 0 ? (value - pt.gross) / pt.gross : 0,
+        pvNet: value - pt.invested,
+        pctNet: pt.invested > 0 ? (value - pt.invested) / pt.invested : 0,
+      };
+    });
+  },
+
+  /** Dividendes reçus : total, par année et par titre. `moves` = liste des mouvements. */
+  dividendSummary(moves) {
+    const out = { total: 0, byYear: {}, byTicker: {} };
+    for (const m of moves) {
+      if (m.kind !== 'dividende') continue;
+      const y = m.date.slice(0, 4);
+      const t = Calc.normTicker(m.ticker);
+      out.total += m.amount;
+      out.byYear[y] = (out.byYear[y] || 0) + m.amount;
+      out.byTicker[t] = (out.byTicker[t] || 0) + m.amount;
+    }
+    return out;
   },
 
   /**
@@ -722,7 +748,7 @@ const Store = {
       purchases: [],            // [{id, date, ticker, qty, price, fees}]
       deposits: [],             // versements sur le PEA [{id, date, amount}] (comptent pour le plafond)
       sales: [],                // ventes [{id, date, ticker, qty, price, fees}]
-      moves: [],                // autres mouvements d'argent [{id, date, amount, kind: 'retrait' | 'credit' | 'frais'}]
+      moves: [],                // autres mouvements d'argent [{id, date, amount, kind: 'retrait' | 'credit' | 'frais' | 'dividende', ticker (dividende)}]
       prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
       settings: { autoRefresh: true, benchmark: '', benchmarks: {} }, // benchmark : indice de comparaison (clé de BENCHMARK_LABELS) ; actualisation auto des cours 1×/jour à l'ouverture
@@ -846,7 +872,9 @@ const Store = {
     const moves = [];
     (Array.isArray(data.moves) ? data.moves : []).forEach((m, idx) => {
       const clean = { id: '', date: String(m && m.date), amount: num(m && m.amount), kind: m && m.kind };
-      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0) || !finite(clean.amount) || !['retrait', 'credit', 'frais'].includes(clean.kind)) {
+      if (clean.kind === 'dividende') clean.ticker = Calc.normTicker(m.ticker);
+      if (!Dates.isValidISO(clean.date) || !(clean.amount > 0) || !finite(clean.amount) || !['retrait', 'credit', 'frais', 'dividende'].includes(clean.kind) ||
+          (clean.kind === 'dividende' && !clean.ticker)) {
         errors.push(`Mouvement n°${idx + 1} invalide.`);
         return;
       }
@@ -1801,11 +1829,15 @@ const App = {
       // Ventes partielles : plus-value déjà encaissée
       const real = realized.filter((r) => r.ticker === pos.ticker);
       const realEl = card.querySelector('[data-f=realized]');
-      realEl.hidden = !real.length;
-      if (real.length) {
+      const divRec = Calc.dividendSummary(App.state.moves).byTicker[pos.ticker] || 0;
+      realEl.hidden = !real.length && !divRec;
+      if (real.length || divRec) {
         const g = real.reduce((s, r) => s + r.gain, 0);
-        realEl.textContent = `Plus-value réalisée (${real.length} vente${real.length > 1 ? 's' : ''}) : ${Fmt.signedEur(g)}`;
-        realEl.className = 'hint ' + cls(g);
+        const parts = [];
+        if (real.length) parts.push(`Plus-value réalisée (${real.length} vente${real.length > 1 ? 's' : ''}) : ${Fmt.signedEur(g)}`);
+        if (divRec) parts.push(`Dividendes reçus : ${Fmt.eur(divRec)}`);
+        realEl.textContent = parts.join(' · ');
+        realEl.className = 'hint ' + (real.length ? cls(g) : '');
       }
       card.querySelector('[data-a=sell]').addEventListener('click', () => App.openSale(pos.ticker));
       card.querySelector('[data-a=report]').addEventListener('click', () => App.openReport(pos.ticker));
@@ -2097,7 +2129,8 @@ const App = {
         }
         rows.push(
           { name: 'Plus-value', value: Fmt.signedEur(ps[i].pv) },
-          { name: 'Valeur', value: Fmt.eur(ps[i].value) },
+          { name: ps[i].div ? 'Valeur (dividendes inclus)' : 'Valeur', value: Fmt.eur(ps[i].value) },
+          ...(ps[i].div ? [{ name: 'dont dividendes reçus', value: Fmt.eur(ps[i].div) }] : []),
           { name: 'Investi (hors frais)', value: Fmt.eur(ps[i].gross) },
         );
         return rows;
@@ -2133,6 +2166,9 @@ const App = {
     if (!b) return [];
     const out = [];
     const names = tickers.map((t) => String((App.state.instruments[t] || {}).name || ''));
+    if (!b.dividendes && App.state.moves.some((m) => m.kind === 'dividende' && tickers.includes(Calc.normTicker(m.ticker)))) {
+      out.push('Vos dividendes sont comptés dans votre courbe, mais pas dans cet indice : la comparaison est un peu en votre faveur.');
+    }
     if (b.ccy === 'USD') out.push('Cet indice est en dollars : l\'écart avec un titre en euros contient aussi l\'effet du change.');
     if (!b.dividendes && names.some((n) => /\bacc\b/i.test(n))) out.push('Cet indice ne compte pas les dividendes, alors que votre ETF à capitalisation (Acc) les réinvestit : il part avec un léger avantage (environ 1 à 3 % par an).');
     return out;
@@ -2167,7 +2203,7 @@ const App = {
     document.querySelectorAll('#positions [data-f=perf]').forEach((el) => {
       const ticker = el.dataset.ticker;
       const hint = el.parentElement.querySelector('[data-f=perf-hint]');
-      const ps = Calc.performanceSeries(purchases, hist, ticker);
+      const ps = Calc.performanceSeries(purchases, hist, ticker, App.state.moves);
       el.hidden = ps.length < 2;
       hint.hidden = ps.length >= 2;
       if (ps.length < 2) {
@@ -2200,7 +2236,7 @@ const App = {
     // Total du portefeuille
     const el = document.getElementById('chart-perf');
     if (!el) return;
-    const ps = Calc.performanceSeries(purchases, hist);
+    const ps = Calc.performanceSeries(purchases, hist, null, App.state.moves);
     const hint = document.getElementById('chart-perf-hint');
     el.hidden = ps.length < 2;
     hint.hidden = ps.length >= 2 || !purchases.length;
@@ -2990,12 +3026,24 @@ const App = {
         versement: 'Virement du compte courant vers le PEA : compte pour le plafond de 150 000 €.',
         credit: 'Ajoute de l\'argent sur le PEA sans compter pour le plafond (ex. régularisation de frais de bourse de 2,20 €).',
         frais: 'Retire de l\'argent du PEA (droits de garde, frais de tenue…).',
+        dividende: 'Argent versé par une entreprise (ou un ETF « Dist ») sur votre PEA. Il s\'ajoute à vos liquidités sans compter pour le plafond, et il est compté dans votre performance. Inutile pour un ETF à capitalisation (Acc).',
         retrait: 'Avant 5 ans, un retrait entraîne en principe la clôture du PEA (sauf cas prévus par la loi). Après 5 ans, les retraits partiels sont possibles.',
       };
       document.getElementById('deposit-kind-hint').textContent = h[df.kind.value];
     };
-    df.kind.addEventListener('change', kindHint);
-    kindHint();
+    // Dividende : on choisit le titre concerné (parmi ceux détenus ou déjà achetés)
+    const tickerLabel = document.getElementById('deposit-ticker-label');
+    const fillTickers = () => {
+      const tickers = [...new Set(App.state.purchases.map((p) => Calc.normTicker(p.ticker)))];
+      df.ticker.replaceChildren(...tickers.map((t) => { const o = document.createElement('option'); o.value = t; o.textContent = t; return o; }));
+    };
+    const kindChange = () => {
+      tickerLabel.hidden = df.kind.value !== 'dividende';
+      if (!tickerLabel.hidden) fillTickers();
+      kindHint();
+    };
+    df.kind.addEventListener('change', kindChange);
+    kindChange();
     df.addEventListener('submit', (e) => {
       e.preventDefault();
       const amount = Calc.parseNumber(df.amount.value);
@@ -3009,12 +3057,17 @@ const App = {
       err.hidden = true;
       if (kind === 'retrait' && !Calc.peaCountdown(App.state.openingDate, df.date.value).reached &&
           !confirm('Ce retrait a lieu avant les 5 ans du PEA : en principe, cela entraîne sa clôture. L\'enregistrer quand même ?')) return;
+      if (kind === 'dividende' && !df.ticker.value) {
+        err.textContent = 'Ajoutez d\'abord un achat : un dividende est rattaché à un titre.';
+        err.hidden = false;
+        return;
+      }
       if (kind === 'versement') App.state.deposits.push({ id: Store.newId(), date: df.date.value, amount });
-      else App.state.moves.push({ id: Store.newId(), date: df.date.value, amount, kind });
+      else App.state.moves.push({ id: Store.newId(), date: df.date.value, amount, kind, ...(kind === 'dividende' ? { ticker: df.ticker.value } : {}) });
       App.persist();
       df.amount.value = '';
       App.renderAll();
-      App.toast({ versement: 'Versement ajouté', credit: 'Crédit ajouté', frais: 'Frais ajoutés', retrait: 'Retrait ajouté' }[kind]);
+      App.toast({ versement: 'Versement ajouté', dividende: 'Dividende ajouté', credit: 'Crédit ajouté', frais: 'Frais ajoutés', retrait: 'Retrait ajouté' }[kind]);
     });
 
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
@@ -3073,7 +3126,7 @@ const App = {
     document.getElementById('pea-ceiling-left').textContent = `Encore ${Fmt.eur0(ce.remaining)} de versements possibles (${Fmt.pct(ce.progress)} utilisé).`;
   },
 
-  MOVE_LABELS: { versement: 'Versement', credit: 'Crédit / régularisation', frais: 'Frais', retrait: 'Retrait' },
+  MOVE_LABELS: { versement: 'Versement', dividende: 'Dividende', credit: 'Crédit / régularisation', frais: 'Frais', retrait: 'Retrait' },
 
   renderDeposits() {
     const list = document.getElementById('deposit-list');
@@ -3087,7 +3140,7 @@ const App = {
       const row = document.createElement('div');
       row.className = 'deposit';
       const date = document.createElement('span');
-      date.textContent = `${Fmt.date(d.date)} · ${App.MOVE_LABELS[d.kind]}`;
+      date.textContent = `${Fmt.date(d.date)} · ${App.MOVE_LABELS[d.kind]}${d.kind === 'dividende' ? ' ' + d.ticker : ''}`;
       const amount = document.createElement('b');
       amount.textContent = Fmt.signedEur(sign * d.amount);
       amount.className = sign < 0 ? 'neg' : '';
@@ -3111,9 +3164,16 @@ const App = {
     const parts = [`versé ${Fmt.eur(c.total)}`];
     if (c.proceeds) parts.push(`ventes +${Fmt.eur(c.proceeds)}`);
     if (c.credits) parts.push(`crédits +${Fmt.eur(c.credits)}`);
+    if (c.dividends) parts.push(`dividendes +${Fmt.eur(c.dividends)}`);
     parts.push(`achats −${Fmt.eur(c.spent)}`);
     if (c.fees) parts.push(`frais −${Fmt.eur(c.fees)}`);
     if (c.withdrawals) parts.push(`retraits −${Fmt.eur(c.withdrawals)}`);
+    const ds = Calc.dividendSummary(App.state.moves);
+    const dEl = document.getElementById('dividend-summary');
+    dEl.hidden = !ds.total;
+    dEl.textContent = ds.total
+      ? `Dividendes reçus : ${Fmt.eur(ds.total)} au total (${Object.entries(ds.byYear).sort().map(([y, v]) => `${y} : ${Fmt.eur(v)}`).join(' · ')}).`
+      : '';
     document.getElementById('cash-summary').textContent = c.hasDeposits
       ? `Liquidités disponibles : ${Fmt.eur(c.cash)} (${parts.join(', ')}).`
       : '';
