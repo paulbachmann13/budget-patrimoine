@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.14.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.15.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -672,6 +672,23 @@ const Calc = {
     const country = { FR: 'CAC40', DE: 'DAX', US: 'SP500' }[isin.slice(0, 2)];
     if (country) return { key: country, why: `action cotée dans le pays de cet indice (code ${isin.slice(0, 2)})` };
     return { key: 'MSCIWORLD', why: 'titre non identifié : le marché mondial sert de repère général' };
+  },
+
+  /**
+   * Frais payés : courtage à l'achat et à la vente, frais prélevés sur le PEA
+   * (droits de garde…), moins les régularisations reçues. Les frais de gestion
+   * d'un ETF sont déjà déduits de son cours : ils n'apparaissent pas ici.
+   * @returns {{courtage, vente, prelevements, total, byYear, brokerage}}
+   */
+  feesSummary(purchases, sales, moves) {
+    const byYear = {};
+    const add = (date, v) => { const y = date.slice(0, 4); byYear[y] = (byYear[y] || 0) + v; };
+    let achat = 0; let vente = 0; let prelevements = 0;
+    for (const p of purchases) { achat += p.fees || 0; add(p.date, p.fees || 0); }
+    for (const s of sales) { vente += s.fees || 0; add(s.date, s.fees || 0); }
+    for (const m of moves) if (m.kind === 'frais') { prelevements += m.amount; add(m.date, m.amount); }
+    const total = achat + vente + prelevements;
+    return { courtage: achat, vente, prelevements, total, byYear };
   },
 
   /**
@@ -1699,6 +1716,33 @@ const App = {
     Budget.renderPatrimoine();
   },
 
+  /** Frais cumulés et poids sur ce qui a été investi. */
+  renderFees() {
+    const card = document.getElementById('fees');
+    const f = Calc.feesSummary(App.state.purchases, App.state.sales, App.state.moves);
+    card.replaceChildren();
+    document.getElementById('fees-title').hidden = card.hidden = !(App.state.purchases.length);
+    if (card.hidden) return;
+    const gross = App.state.purchases.reduce((s, p) => s + p.qty * p.price, 0);
+    const line = (text, strong) => { const p = document.createElement('p'); p.className = strong ? 'fees-total' : 'hint'; p.textContent = text; card.appendChild(p); };
+    line(f.total > 0 ? `${Fmt.eur(f.total)} de frais payés au total` : 'Aucun frais payé : bravo, ou pensez à saisir les frais de vos achats.', true);
+    if (f.total > 0 && gross > 0) {
+      const share = f.total / gross;
+      line(`Cela représente ${Fmt.pct(share)} de ce que vous avez investi : votre performance est réduite d'autant, une seule fois.`);
+      const parts = [];
+      if (f.courtage) parts.push(`achats ${Fmt.eur(f.courtage)}`);
+      if (f.vente) parts.push(`ventes ${Fmt.eur(f.vente)}`);
+      if (f.prelevements) parts.push(`prélevés sur le PEA ${Fmt.eur(f.prelevements)}`);
+      line(`Détail : ${parts.join(' · ')}.`);
+      const years = Object.entries(f.byYear).filter(([, v]) => v > 0).sort();
+      if (years.length > 1) line(`Par année : ${years.map(([y, v]) => `${y} : ${Fmt.eur(v)}`).join(' · ')}.`);
+      // Astuce : des frais fixes pèsent plus lourd sur de petits achats
+      const small = App.state.purchases.filter((p) => p.fees > 0 && p.fees / (p.qty * p.price) > 0.01).length;
+      if (small) line(`${small} achat${small > 1 ? 's' : ''} avec des frais de plus de 1 % du montant : regrouper vos achats (par exemple un par mois plutôt qu'un par semaine) réduit les frais.`);
+    }
+    line('Les frais de gestion de vos ETF (environ 0,1 à 0,4 % par an) ne sont pas ici : ils sont déjà retirés du cours.');
+  },
+
   /** Répartition : barres par titre et par zone. */
   renderAllocation() {
     const card = document.getElementById('allocation');
@@ -1733,6 +1777,7 @@ const App = {
 
   renderCharts() {
     App.renderAllocation();
+    App.renderFees();
     App.renderCumulChart();
     App.renderPerfCharts();
     App.renderSimChart();
