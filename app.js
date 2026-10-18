@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.17.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.18.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -672,6 +672,32 @@ const Calc = {
     const country = { FR: 'CAC40', DE: 'DAX', US: 'SP500' }[isin.slice(0, 2)];
     if (country) return { key: country, why: `action cotée dans le pays de cet indice (code ${isin.slice(0, 2)})` };
     return { key: 'MSCIWORLD', why: 'titre non identifié : le marché mondial sert de repère général' };
+  },
+
+  /**
+   * Compare deux historiques de cours sur la même période : performance de chacun
+   * (en %) depuis la première date où les deux existent (et pas avant fromISO).
+   * Les jours sans cotation d'un côté reprennent le dernier cours connu.
+   * @returns {{dates:string[], a:number[], b:number[]}} (listes vides si pas de période commune)
+   */
+  compareSeries(histA, histB, fromISO = '') {
+    const empty = { dates: [], a: [], b: [] };
+    if (!histA || !histB || !histA.length || !histB.length) return empty;
+    const start = [histA[0][0], histB[0][0], fromISO].sort().pop();
+    const dates = [...new Set([...histA, ...histB].map((h) => h[0]))].filter((d) => d >= start).sort();
+    if (dates.length < 2) return empty;
+    const at = (h) => {
+      let i = -1;
+      return (d) => { while (i + 1 < h.length && h[i + 1][0] <= d) i++; return i < 0 ? null : h[i][1]; };
+    };
+    const pa = at(histA); const pb = at(histB);
+    const a0 = pa(dates[0]); const b0 = pb(dates[0]);
+    if (!(a0 > 0) || !(b0 > 0)) return empty;
+    return {
+      dates,
+      a: dates.map((d) => pa(d) / a0 - 1),
+      b: dates.map((d) => pb(d) / b0 - 1),
+    };
   },
 
   /**
@@ -1632,6 +1658,7 @@ const App = {
     App.bindSales();
     App.bindPlanner();
     App.bindSimulator();
+    App.bindCompare();
     App.bindPea();
     App.bindBanners();
     Budget.init();
@@ -1782,6 +1809,107 @@ const App = {
     Budget.renderPatrimoine();
   },
 
+  /* ---------- Comparer deux titres ---------- */
+  cmp: { a: '', b: '', period: 'max' },
+  CMP_PERIODS: { '1m': ['1 mois', 1], '3m': ['3 mois', 3], '6m': ['6 mois', 6], '1a': ['1 an', 12], max: ['Tout', 0] },
+
+  /** Séries comparables : mes titres (avec historique) puis les indices. */
+  compareSources() {
+    const hist = Calc.withLatestQuotes(App.histories, App.state.prices);
+    const out = [];
+    for (const t of Object.keys(hist).sort()) {
+      if (!hist[t].length) continue;
+      const ins = App.state.instruments[t];
+      out.push({ id: 'T:' + t, label: ins && ins.name ? `${t} · ${ins.name}` : t, group: 'Mes titres', hist: hist[t], ticker: t });
+    }
+    for (const [k, h] of Object.entries(App.benchmarks)) {
+      if (BENCHMARKS[k] && h && h.length) out.push({ id: 'B:' + k, label: BENCHMARKS[k].label, group: 'Indices', hist: h, key: k });
+    }
+    return out;
+  },
+
+  renderCompare() {
+    const card = document.getElementById('compare-card');
+    const src = App.compareSources();
+    const title = document.getElementById('compare-title');
+    title.hidden = card.hidden = src.length < 2;
+    if (card.hidden) return;
+    const c = App.cmp;
+    const byId = Object.fromEntries(src.map((s) => [s.id, s]));
+    if (!byId[c.a]) {
+      const mine = src.find((s) => s.ticker);
+      c.a = (mine || src[0]).id;
+    }
+    if (!byId[c.b] || c.b === c.a) {
+      const a = byId[c.a];
+      const sug = a.ticker ? 'B:' + Calc.suggestBenchmark(App.state.instruments[a.ticker]).key : '';
+      c.b = byId[sug] && sug !== c.a ? sug : (src.find((s) => s.id !== c.a) || {}).id;
+    }
+    for (const [elId, val] of [['cmp-a', c.a], ['cmp-b', c.b]]) {
+      const sel = document.getElementById(elId);
+      sel.replaceChildren();
+      for (const g of ['Mes titres', 'Indices']) {
+        const items = src.filter((s) => s.group === g);
+        if (!items.length) continue;
+        const og = document.createElement('optgroup'); og.label = g;
+        for (const s of items) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.label; og.appendChild(o); }
+        sel.appendChild(og);
+      }
+      sel.value = val;
+    }
+    document.querySelectorAll('#cmp-periods .chip').forEach((b) => b.classList.toggle('active', b.dataset.p === c.period));
+
+    const months = App.CMP_PERIODS[c.period][1];
+    let from = '';
+    if (months) { const d = new Date(); d.setMonth(d.getMonth() - months); from = Dates.toISO(d); }
+    const A = byId[c.a]; const B = byId[c.b];
+    const cs = Calc.compareSeries(A.hist, B.hist, from);
+    const el = document.getElementById('chart-compare');
+    const note = document.getElementById('cmp-note');
+    if (el.offsetParent === null) return; // vue masquée : pas de largeur à mesurer
+    if (!cs.dates.length) {
+      el.replaceChildren();
+      note.textContent = 'Pas assez de cours en commun sur cette période.';
+      return;
+    }
+    const nameA = A.ticker || BENCHMARKS[A.key].label.split(' (')[0];
+    const nameB = B.ticker || BENCHMARKS[B.key].label.split(' (')[0];
+    drawChart(el, {
+      signed: true,
+      xs: cs.dates.map((d) => Dates.parse(d).getTime()),
+      series: [
+        { name: nameA, color: '--series-invested', values: cs.a },
+        { name: nameB, color: '--series-rate', values: cs.b },
+      ],
+      xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
+      tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
+      tooltipRows: (i) => [
+        { name: nameA, color: '--series-invested', value: Fmt.signedPct(cs.a[i]) },
+        { name: nameB, color: '--series-rate', value: Fmt.signedPct(cs.b[i]) },
+        { name: 'Écart', value: Fmt.signedPct(cs.a[i] - cs.b[i]) },
+      ],
+      yFormat: Fmt.signedPct,
+      tickFormat: (v) => (v > 0 ? '+' : '') + String(Math.round(v * 10000) / 100).replace('.', ',') + ' %',
+    });
+    const last = cs.dates.length - 1;
+    const gap = (cs.a[last] - cs.b[last]) * 100;
+    const g = Math.abs(gap).toFixed(2).replace('.', ',');
+    const lines = [
+      `Depuis le ${Fmt.date(cs.dates[0])} : ${nameA} ${Fmt.signedPct(cs.a[last])} · ${nameB} ${Fmt.signedPct(cs.b[last])} · ${nameA} ${gap >= 0 ? `+${g} pt devant` : `−${g} pt derrière`} ${nameB}.`,
+    ];
+    // Pièges : devise et dividendes de l'indice éventuel, rapportés au titre de l'autre côté
+    for (const [x, other] of [[A, B], [B, A]]) if (x.key) lines.push(...App.benchCaveats(x.key, other.ticker ? [other.ticker] : []));
+    lines.push('Performances en cours de bourse, hors frais.');
+    note.textContent = lines.join(' ');
+  },
+
+  bindCompare() {
+    for (const [id, k] of [['cmp-a', 'a'], ['cmp-b', 'b']]) {
+      document.getElementById(id).addEventListener('change', (e) => { App.cmp[k] = e.target.value; App.renderCompare(); });
+    }
+    document.querySelectorAll('#cmp-periods .chip').forEach((b) => b.addEventListener('click', () => { App.cmp.period = b.dataset.p; App.renderCompare(); }));
+  },
+
   /** Calendrier de versements : une case par mois. */
   renderCalendar() {
     const card = document.getElementById('calendar');
@@ -1905,6 +2033,7 @@ const App = {
   },
 
   renderCharts() {
+    App.renderCompare();
     App.renderCalendar();
     App.renderAllocation();
     App.renderFees();

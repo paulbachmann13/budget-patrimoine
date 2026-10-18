@@ -607,3 +607,9 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .cal-pending { outline: 1px dashed var(--muted); }
 #calendar .hint, #calendar-summary { padding: 0 8px; }
 .bench-pick input { width: 6em; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--muted); border-radius: 8px; padding: 4px 8px; }
+
+/* Comparer deux titres */
+.cmp-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 8px 4px; font-size: 13px; color: var(--ink-2); }
+.cmp-pick select { flex: 1 1 140px; min-width: 0; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--muted); border-radius: 8px; padding: 6px 8px; }
+#cmp-periods { padding: 0 8px; margin: 4px 0 8px; }
+#cmp-periods .chip { min-height: 34px; padding: 0 12px; }

@@ -820,3 +820,15 @@ test('calendrier de versements : mois, objectif, série et mois en cours', () =>
   // passage d'année
   assert.equal(Calc.monthlyCalendar([{ date: '2025-11-03', qty: 1, price: 1, fees: 0 }], 0, '2026-02-01').months.length, 4);
 });
+
+test('compareSeries : base 0 % à la première date commune, cours reportés', () => {
+  const a = [['2026-01-02', 100], ['2026-01-03', 110], ['2026-01-06', 121]];
+  const b = [['2026-01-03', 50], ['2026-01-05', 45], ['2026-01-06', 60]];
+  const c = Calc.compareSeries(a, b);
+  assert.deepEqual(c.dates, ['2026-01-03', '2026-01-05', '2026-01-06']); // démarre quand les deux existent
+  close(c.a[0], 0); close(c.a[2], 0.1); // 121 / 110 − 1
+  close(c.b[1], -0.1); close(c.b[2], 0.2);
+  close(c.a[1], 0); // 05/01 : A garde son cours du 03/01
+  assert.deepEqual(Calc.compareSeries(a, b, '2026-01-06'), { dates: [], a: [], b: [] }); // un seul jour : pas de courbe
+  assert.deepEqual(Calc.compareSeries(a, []), { dates: [], a: [], b: [] });
+});
