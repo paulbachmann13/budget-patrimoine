@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.18.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.18.1'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -1813,6 +1813,27 @@ const App = {
   cmp: { a: '', b: '', period: 'max' },
   CMP_PERIODS: { '1m': ['1 mois', 1], '3m': ['3 mois', 3], '6m': ['6 mois', 6], '1a': ['1 an', 12], max: ['Tout', 0] },
 
+  extendTried: new Set(),
+
+  /**
+   * Un titre acheté récemment n'a parfois d'historique que depuis son premier achat.
+   * Pour comparer sur 1 an ou plus, on rapatrie depuis Euronext l'historique manquant
+   * (une seule tentative par titre et par période), puis on redessine.
+   */
+  async extendHistory(ticker, fromISO) {
+    const key = `${ticker}:${fromISO}`;
+    if (App.extendTried.has(key)) return;
+    App.extendTried.add(key);
+    try {
+      const q = await Euronext.quote(ticker, App.state.instruments[ticker] || null, fetch, fromISO);
+      if (q.history && q.history.length) {
+        App.histories[ticker] = Calc.mergeHistory(App.histories[ticker], q.history);
+        App.saveHistories();
+        App.renderCompare();
+      }
+    } catch (e) { console.warn('Historique plus ancien indisponible', ticker, e); }
+  },
+
   /** Séries comparables : mes titres (avec historique) puis les indices. */
   compareSources() {
     const hist = Calc.withLatestQuotes(App.histories, App.state.prices);
@@ -1863,6 +1884,11 @@ const App = {
     let from = '';
     if (months) { const d = new Date(); d.setMonth(d.getMonth() - months); from = Dates.toISO(d); }
     const A = byId[c.a]; const B = byId[c.b];
+    // Historique trop court d'un de mes titres pour la période demandée : on va chercher le reste
+    const want = from || Dates.toISO(new Date(new Date().setFullYear(new Date().getFullYear() - 5)));
+    for (const x of [A, B]) {
+      if (x.ticker && x.hist[0][0] > want) App.extendHistory(x.ticker, want);
+    }
     const cs = Calc.compareSeries(A.hist, B.hist, from);
     const el = document.getElementById('chart-compare');
     const note = document.getElementById('cmp-note');
