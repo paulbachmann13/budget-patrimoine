@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.16.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.17.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -675,6 +675,48 @@ const Calc = {
   },
 
   /**
+   * Calendrier de versements : un mois par case, du premier achat (ou des 24
+   * derniers mois) jusqu'au mois en cours. Le mois en cours sans achat est « en attente »
+   * et ne casse pas la série. goal = objectif mensuel en € (0 = tout achat compte).
+   * @returns {{months:[{month, amount, count, status}], streak, done, total, avg, goal}}
+   *   status : 'ok' (objectif atteint) | 'partial' | 'none' | 'pending'
+   */
+  monthlyCalendar(purchases, goal = 0, todayISO = Dates.today()) {
+    if (!purchases.length) return { months: [], streak: 0, done: 0, total: 0, avg: 0, goal };
+    const first = purchases.map((p) => p.date).sort()[0].slice(0, 7);
+    const cur = todayISO.slice(0, 7);
+    const all = [];
+    let [y, m] = first.split('-').map(Number);
+    for (;;) {
+      const key = `${y}-${String(m).padStart(2, '0')}`;
+      if (key > cur) break;
+      all.push(key);
+      if (m === 12) { y++; m = 1; } else m++;
+    }
+    const months = all.slice(-24).map((month) => {
+      const inMonth = purchases.filter((p) => p.date.slice(0, 7) === month);
+      const amount = inMonth.reduce((s, p) => s + Calc.purchaseCost(p), 0);
+      let status = 'none';
+      if (amount > 0) status = goal > 0 && amount < goal - 0.005 ? 'partial' : 'ok';
+      else if (month === cur) status = 'pending';
+      return { month, amount, count: inMonth.length, status };
+    });
+    let streak = 0;
+    for (let i = months.length - 1; i >= 0; i--) {
+      if (months[i].status === 'pending') continue;
+      if (months[i].status !== 'ok') break;
+      streak++;
+    }
+    const counted = months.filter((x) => x.status !== 'pending');
+    return {
+      months, streak, goal,
+      done: counted.filter((x) => x.status === 'ok').length,
+      total: counted.length,
+      avg: counted.length ? counted.reduce((s, x) => s + x.amount, 0) / counted.length : 0,
+    };
+  },
+
+  /**
    * Scénarios de baisse du marché : pour chaque baisse, ce qui reste, la perte,
    * et le temps pour retrouver la valeur d'avant — en continuant les versements
    * mensuels, et sans verser. Rendement annuel supposé après la baisse (annualRate, en %).
@@ -820,7 +862,7 @@ const Store = {
       moves: [],                // autres mouvements d'argent [{id, date, amount, kind: 'retrait' | 'credit' | 'frais' | 'dividende', ticker (dividende)}]
       prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
-      settings: { autoRefresh: true, benchmark: '', benchmarks: {} }, // benchmark : indice de comparaison (clé de BENCHMARK_LABELS) ; actualisation auto des cours 1×/jour à l'ouverture
+      settings: { autoRefresh: true, benchmark: '', benchmarks: {}, monthlyGoal: 0 }, // benchmark : indice de comparaison (clé de BENCHMARK_LABELS) ; actualisation auto des cours 1×/jour à l'ouverture
       lastAutoRefresh: null,    // date de la dernière actualisation automatique
       sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, growth: 0, inflation: 2, target: 100000, useReal: true, mode: 'projection' }, // useReal : partir de mes vrais chiffres ; mode : projection | objectif
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
@@ -1000,6 +1042,7 @@ const Store = {
         settings: {
           autoRefresh: !(data.settings && data.settings.autoRefresh === false),
           benchmark: data.settings && (data.settings.benchmark === 'none' || Object.prototype.hasOwnProperty.call(BENCHMARKS, data.settings.benchmark)) ? data.settings.benchmark : '',
+          monthlyGoal: Number(data.settings && data.settings.monthlyGoal) > 0 && Number(data.settings.monthlyGoal) <= 100000 ? Number(data.settings.monthlyGoal) : 0,
           benchmarks: Object.fromEntries(Object.entries((data.settings && data.settings.benchmarks) || {})
             .filter(([t, v]) => typeof t === 'string' && t.length <= 20 && (v === 'none' || Object.prototype.hasOwnProperty.call(BENCHMARKS, v)))),
         },
@@ -1739,6 +1782,35 @@ const App = {
     Budget.renderPatrimoine();
   },
 
+  /** Calendrier de versements : une case par mois. */
+  renderCalendar() {
+    const card = document.getElementById('calendar');
+    const goal = App.state.settings.monthlyGoal || 0;
+    const cal = Calc.monthlyCalendar(App.state.purchases, goal);
+    document.getElementById('calendar-title').hidden = card.hidden = !cal.months.length;
+    if (card.hidden) return;
+    const input = document.getElementById('calendar-goal');
+    if (document.activeElement !== input) input.value = goal ? String(goal).replace('.', ',') : '';
+    const grid = document.getElementById('calendar-grid');
+    grid.replaceChildren();
+    for (const m of cal.months) {
+      const cell = document.createElement('div');
+      cell.className = 'cal-cell cal-' + m.status;
+      const [y, mo] = m.month.split('-').map(Number);
+      const name = document.createElement('span');
+      name.textContent = new Date(y, mo - 1, 1).toLocaleDateString('fr-FR', { month: 'short' }).replace('.', '') + (mo === 1 || m === cal.months[0] ? ` ${String(y).slice(2)}` : '');
+      const amt = document.createElement('b');
+      amt.textContent = m.amount > 0 ? Fmt.eur0(m.amount) : (m.status === 'pending' ? '…' : '—');
+      cell.title = `${m.month} : ${m.amount > 0 ? Fmt.eur(m.amount) + ' en ' + m.count + ' achat' + (m.count > 1 ? 's' : '') : 'aucun achat'}`;
+      cell.append(name, amt);
+      grid.appendChild(cell);
+    }
+    const reach = goal > 0 ? `objectif de ${Fmt.eur0(goal)} atteint` : 'avec un achat';
+    document.getElementById('calendar-summary').textContent =
+      `${cal.done} mois sur ${cal.total} ${reach} · série en cours : ${cal.streak} mois · moyenne : ${Fmt.eur0(cal.avg)} par mois.`
+      + (cal.months[cal.months.length - 1].status === 'pending' ? ' Pas encore d\'achat ce mois-ci.' : '');
+  },
+
   /** Durée en mois → texte (« 8 mois », « 2 ans et 3 mois »). */
   monthsText(m) {
     if (m === null) return 'plus de 50 ans';
@@ -1833,6 +1905,7 @@ const App = {
   },
 
   renderCharts() {
+    App.renderCalendar();
     App.renderAllocation();
     App.renderFees();
     App.renderCumulChart();
@@ -3237,6 +3310,12 @@ const App = {
 
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
     document.getElementById('import-file').addEventListener('change', App.importJSON);
+    document.getElementById('calendar-goal').addEventListener('change', (e) => {
+      const v = Calc.parseNumber(e.target.value);
+      App.state.settings.monthlyGoal = v > 0 && v <= 100000 ? Math.round(v * 100) / 100 : 0;
+      App.persist();
+      App.renderCalendar();
+    });
     document.getElementById('bench-select').addEventListener('change', (e) => {
       App.state.settings.benchmark = e.target.value;
       App.persist();

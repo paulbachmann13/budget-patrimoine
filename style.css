@@ -597,3 +597,13 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .alloc-bar i { display: block; height: 100%; background: var(--series-invested); border-radius: 4px; }
 
 .fees-total { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
+
+/* Calendrier de versements */
+.cal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; padding: 0 8px; }
+.cal-cell { display: flex; flex-direction: column; align-items: center; padding: 6px 2px; border-radius: 8px; font-size: 12px; background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--ink-2); }
+.cal-cell b { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink); }
+.cal-ok { background: color-mix(in srgb, var(--good) 30%, transparent); }
+.cal-partial { background: color-mix(in srgb, var(--series-rate) 35%, transparent); }
+.cal-pending { outline: 1px dashed var(--muted); }
+#calendar .hint, #calendar-summary { padding: 0 8px; }
+.bench-pick input { width: 6em; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--muted); border-radius: 8px; padding: 4px 8px; }
