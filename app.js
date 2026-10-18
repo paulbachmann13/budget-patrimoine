@@ -12,7 +12,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.10.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
+const APP_VERSION = '2.11.0'; // affichée en haut de l'écran ; garder identique à VERSION dans sw.js
 const PEA_CEILING = 150000; // plafond de versements d'un PEA classique (€)
 
 /* ==========================================================================
@@ -625,6 +625,41 @@ const Calc = {
   },
 
   /**
+   * « Et si j'avais mis les mêmes sommes dans l'indice ? » : chaque achat est
+   * rejoué sur l'indice au même jour et pour le même montant (hors frais).
+   * Renvoie [{date, pct}] sur les jours de cotation de l'indice, ou [] sans historique.
+   */
+  benchmarkSeries(purchases, benchHistory) {
+    if (!benchHistory || !benchHistory.length) return [];
+    const priceAt = (d) => {
+      let lo = 0; let hi = benchHistory.length - 1; let found = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (benchHistory[mid][0] <= d) { found = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      return found < 0 ? null : benchHistory[found][1];
+    };
+    const synth = [];
+    for (const p of purchases) {
+      const px = priceAt(p.date);
+      if (px) synth.push({ date: p.date, ticker: 'BENCH', qty: (p.qty * p.price) / px, price: px, fees: 0 });
+    }
+    return Calc.performanceSeries(synth, { BENCH: benchHistory }).map((pt) => ({ date: pt.date, pct: pt.pct }));
+  },
+
+  /**
+   * Aligne une série [{date, pct}] sur une liste de dates : dernière valeur
+   * connue à chaque date (jours fériés différents d'une place à l'autre).
+   */
+  alignPct(series, dates) {
+    let i = -1;
+    return dates.map((d) => {
+      while (i + 1 < series.length && series[i + 1].date <= d) i++;
+      return i < 0 ? null : series[i].pct;
+    });
+  },
+
+  /**
    * Historiques + dernier cours connu (Euronext ou saisi) ajouté comme dernier
    * point s'il est plus récent : la courbe finit sur le chiffre de la carte.
    */
@@ -666,7 +701,7 @@ const Store = {
       moves: [],                // autres mouvements d'argent [{id, date, amount, kind: 'retrait' | 'credit' | 'frais'}]
       prices: {},               // { TICKER: {price, date, source, at} } — date = séance, at = actualisation
       instruments: {},          // { TICKER: {isin, mic, symbol, name} } — résolu via Euronext
-      settings: { autoRefresh: true }, // actualisation auto des cours 1×/jour à l'ouverture
+      settings: { autoRefresh: true, benchmark: '' }, // benchmark : indice de comparaison (clé de BENCHMARK_LABELS) ; actualisation auto des cours 1×/jour à l'ouverture
       lastAutoRefresh: null,    // date de la dernière actualisation automatique
       sim: { monthly: 100, rate: 7, years: 20, initial: 0, ter: 0.2, growth: 0, inflation: 2, target: 100000, useReal: true, mode: 'projection' }, // useReal : partir de mes vrais chiffres ; mode : projection | objectif
       plan: { amount: 100, fees: 0 }, // calculateur « prochain achat »
@@ -841,7 +876,10 @@ const Store = {
         moves,
         prices,
         instruments,
-        settings: { autoRefresh: !(data.settings && data.settings.autoRefresh === false) },
+        settings: {
+          autoRefresh: !(data.settings && data.settings.autoRefresh === false),
+          benchmark: data.settings && Object.prototype.hasOwnProperty.call(BENCHMARK_LABELS, data.settings.benchmark) ? data.settings.benchmark : '',
+        },
         lastAutoRefresh: Dates.isValidISO(data.lastAutoRefresh) ? data.lastAutoRefresh : null,
         sim,
         plan,
@@ -903,8 +941,25 @@ function parsePricesFile(json) {
         .sort((a, b) => a[0].localeCompare(b[0]));
     }
   }
-  return { quotes, histories, updatedAt: json.updatedAt || null };
+  const benchmarks = {};
+  for (const [k, q] of Object.entries(json.benchmarks || {})) {
+    if (q && Array.isArray(q.history)) {
+      benchmarks[k] = q.history
+        .filter((h) => Array.isArray(h) && Dates.isValidISO(h[0]) && Number(h[1]) > 0)
+        .map((h) => [h[0], Number(h[1])])
+        .sort((a, b) => a[0].localeCompare(b[0]));
+    }
+  }
+  return { quotes, histories, benchmarks, updatedAt: json.updatedAt || null };
 }
+
+/** Indices proposés pour la comparaison (clé = celle de data/prices.json). */
+const BENCHMARK_LABELS = {
+  CAC40: 'CAC 40',
+  STOXX50: 'Euro Stoxx 50',
+  MSCIWORLD: 'MSCI World',
+  SP500: 'S&P 500 (en $)',
+};
 
 const PriceProviders = {
   manual: {
@@ -1230,7 +1285,7 @@ function drawChart(container, opts) {
   series.forEach((s, si) => {
     shown[si] = s.values.map((v, i) => (stacked && si > 0 ? shown[si - 1][i] + v : v));
   });
-  const flat = shown.flat();
+  const flat = shown.flat().filter((v) => v != null);
   // Valeurs négatives (performance) : l'axe descend sous le zéro ; sinon il part de 0
   const signed = opts.signed === true;
   const yMax = signed ? Math.max(...flat, 0.0001) : Math.max(...flat, 1);
@@ -1278,17 +1333,42 @@ function drawChart(container, opts) {
   // Chemins : ligne (2px) + aire translucide
   const pathFor = (vals, st) => {
     let d = '';
+    let started = false;
     vals.forEach((v, i) => {
+      if (v == null) { started = false; return; } // pas de valeur (indice pas encore coté) : on saute
       const X = sx(xs[i]); const Y = sy(v);
-      if (i === 0) d += `M${X},${Y}`;
+      if (!started) { d += `M${X},${Y}`; started = true; }
       else if (st) d += `H${X}V${Y}`;
       else d += `L${X},${Y}`;
     });
     if (xs.length === 1) d += `H${W - m.right}`; // un seul point : ligne horizontale
     return d;
   };
+  // Courbe « vert au-dessus de 0, rouge en dessous » : deux zones de découpe de part et d'autre du zéro
+  const needSplit = series.some((s) => s.split);
+  let clipUp = null; let clipDown = null;
+  if (needSplit) {
+    const defs = svgEl('defs', {}, svg);
+    const z = sy(0);
+    const mk = (id, y, h) => {
+      const c = svgEl('clipPath', { id }, defs);
+      svgEl('rect', { x: 0, y, width: W, height: Math.max(h, 0) }, c);
+      return `url(#${id})`;
+    };
+    const uid = 'clip' + Math.random().toString(36).slice(2, 8);
+    clipUp = mk(uid + 'u', 0, z);
+    clipDown = mk(uid + 'd', z, H - z);
+  }
   series.forEach((s, si) => {
     const line = pathFor(shown[si], step || s.step);
+    if (s.split) {
+      const area = line + `V${sy(0)}H${sx(xs[0])}Z`;
+      [[clipUp, '--good'], [clipDown, '--bad']].forEach(([clip, col]) => {
+        svgEl('path', { d: area, 'clip-path': clip, style: `fill: var(${col}); fill-opacity: 0.22; stroke: none` }, svg);
+        svgEl('path', { d: line, 'clip-path': clip, style: `fill: none; stroke: var(${col})`, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+      });
+      return;
+    }
     if (s.area) {
       const lower = si > 0 && stacked ? shown[si - 1] : null;
       let d = line;
@@ -1306,7 +1386,7 @@ function drawChart(container, opts) {
 
   // Couche d'interaction (crosshair + infobulle)
   const cross = svgEl('line', { class: 'crosshair', y1: m.top, y2: H - m.bottom, visibility: 'hidden' }, svg);
-  const dots = series.map((s) => svgEl('circle', { r: 4, style: `fill: var(${s.color}); stroke: var(--surface)`, 'stroke-width': 2, visibility: 'hidden' }, svg));
+  const dots = series.map((s) => svgEl('circle', { r: 4, style: `fill: var(${s.split ? '--muted' : s.color}); stroke: var(--surface)`, 'stroke-width': 2, visibility: 'hidden' }, svg));
   const hit = svgEl('rect', { x: m.left, y: 0, width: W - m.left - m.right, height: H, fill: 'transparent' }, svg);
 
   const tooltip = document.getElementById('tooltip');
@@ -1318,7 +1398,12 @@ function drawChart(container, opts) {
     xs.forEach((x, i) => { const dd = Math.abs(sx(x) - px); if (dd < best) { best = dd; idx = i; } });
     const X = sx(xs[idx]);
     cross.setAttribute('x1', X); cross.setAttribute('x2', X); cross.setAttribute('visibility', 'visible');
-    dots.forEach((dot, si) => { dot.setAttribute('cx', X); dot.setAttribute('cy', sy(shown[si][idx])); dot.setAttribute('visibility', 'visible'); });
+    dots.forEach((dot, si) => {
+      const v = shown[si][idx];
+      if (v == null) { dot.setAttribute('visibility', 'hidden'); return; }
+      dot.setAttribute('cx', X); dot.setAttribute('cy', sy(v)); dot.setAttribute('visibility', 'visible');
+      if (series[si].split) dot.style.fill = v >= 0 ? 'var(--good)' : 'var(--bad)';
+    });
 
     tooltip.replaceChildren();
     const title = document.createElement('div');
@@ -1366,6 +1451,7 @@ const App = {
     document.getElementById('app-version').textContent = `Budget & Patrimoine v${APP_VERSION} — cours : Euronext en direct, secours ${ACTIVE_PROVIDER.label.toLowerCase()}`;
     App.state = Store.load();
     App.histories = App.loadHistories();
+    App.benchmarks = App.loadBenchmarks();
     App.applyTheme();
     App.bindNavigation();
     App.bindPurchases();
@@ -1466,6 +1552,16 @@ const App = {
   },
   saveHistories() {
     try { localStorage.setItem(App.HISTORY_KEY, JSON.stringify(App.histories)); } catch (e) { /* quota : tant pis */ }
+  },
+
+  /* Historiques des indices de référence (données publiques, hors export) */
+  BENCH_KEY: 'budget-patrimoine:pea:benchmarks',
+  benchmarks: {},
+  loadBenchmarks() {
+    try { return JSON.parse(localStorage.getItem(App.BENCH_KEY)) || {}; } catch (e) { return {}; }
+  },
+  saveBenchmarks() {
+    try { localStorage.setItem(App.BENCH_KEY, JSON.stringify(App.benchmarks)); } catch (e) { /* quota : tant pis */ }
   },
 
   persist() { Store.save(App.state); },
@@ -1622,6 +1718,7 @@ const App = {
         <div class="perf-box">
           <p class="label">Ma performance</p>
           <div class="chart chart-small" data-f="perf" role="img"></div>
+          <p class="hint bench-note" data-f="perf-bench" hidden></p>
           <p class="hint" data-f="perf-hint" hidden></p>
         </div>
         <div class="quote-box">
@@ -1879,8 +1976,11 @@ const App = {
     const merged = { ...App.histories, ...data.histories };
     const histChanged = JSON.stringify(merged) !== JSON.stringify(App.histories);
     if (histChanged) { App.histories = merged; App.saveHistories(); }
+    const benchMerged = { ...App.benchmarks, ...(data.benchmarks || {}) };
+    const benchChanged = JSON.stringify(benchMerged) !== JSON.stringify(App.benchmarks);
+    if (benchChanged) { App.benchmarks = benchMerged; App.saveBenchmarks(); }
     if (n) App.persist();
-    if (n || histChanged) App.renderAll();
+    if (n || histChanged || benchChanged) App.renderAll();
     if (!silent) App.toast(n ? `${n} cours mis à jour` : 'Cours déjà à jour');
     return true;
   },
@@ -1931,25 +2031,57 @@ const App = {
    * comme la carte du titre), jour par jour depuis le premier achat.
    * Un graphique par titre + un pour le total.
    */
-  perfChartOpts(ps, ariaLabel) {
+  perfChartOpts(ps, ariaLabel, purchases = null) {
     const up = ps[ps.length - 1].pct >= 0;
     const color = up ? '--good' : '--bad';
+    const series = [{ name: 'Performance', color, values: ps.map((p) => p.pct), area: true, split: true }];
+    // Comparaison : mêmes sommes placées dans l'indice choisi
+    const key = App.state.settings.benchmark;
+    let bench = null;
+    if (key && purchases && App.benchmarks[key]) {
+      const bs = Calc.benchmarkSeries(purchases, App.benchmarks[key]);
+      if (bs.length) {
+        bench = { label: BENCHMARK_LABELS[key] || key, pcts: Calc.alignPct(bs, ps.map((p) => p.date)) };
+        series.push({ name: bench.label, color: '--series-invested', values: bench.pcts, dash: true });
+      }
+    }
     return {
       signed: true,
+      bench,
       xs: ps.map((p) => Dates.parse(p.date).getTime()),
-      series: [{ name: 'Performance', color, values: ps.map((p) => p.pct), area: true }],
+      series,
       xLabel: (x) => Fmt.monthYear(Dates.toISO(new Date(x))),
       tooltipTitle: (x) => Fmt.date(Dates.toISO(new Date(x))),
-      tooltipRows: (i) => [
-        { name: 'Performance', color, value: Fmt.signedPct(ps[i].pct) },
-        { name: 'Plus-value', value: Fmt.signedEur(ps[i].pv) },
-        { name: 'Valeur', value: Fmt.eur(ps[i].value) },
-        { name: 'Investi (hors frais)', value: Fmt.eur(ps[i].gross) },
-      ],
+      tooltipRows: (i) => {
+        const rows = [
+          { name: 'Performance', color: ps[i].pct >= 0 ? '--good' : '--bad', value: Fmt.signedPct(ps[i].pct) },
+        ];
+        if (bench && bench.pcts[i] != null) {
+          rows.push({ name: bench.label, color: '--series-invested', value: Fmt.signedPct(bench.pcts[i]) });
+          const gap = ps[i].pct - bench.pcts[i];
+          rows.push({ name: gap >= 0 ? 'Mieux que l\'indice' : 'Moins bien que l\'indice', value: Fmt.signedPct(gap).replace(/^([+-])/, '$1') });
+        }
+        rows.push(
+          { name: 'Plus-value', value: Fmt.signedEur(ps[i].pv) },
+          { name: 'Valeur', value: Fmt.eur(ps[i].value) },
+          { name: 'Investi (hors frais)', value: Fmt.eur(ps[i].gross) },
+        );
+        return rows;
+      },
       yFormat: Fmt.signedPct,
       tickFormat: (v) => (v > 0 ? '+' : '') + String(Math.round(v * 10000) / 100).replace('.', ',') + ' %',
       ariaLabel,
     };
+  },
+
+  /** Phrase « vs indice » : écart final en points de pourcentage. */
+  benchVerdict(ps, bench) {
+    const last = ps.length - 1;
+    const b = bench && bench.pcts[last];
+    if (b == null) return '';
+    const gap = (ps[last].pct - b) * 100;
+    const g = Math.abs(gap).toFixed(2).replace('.', ',');
+    return `${bench.label} : ${Fmt.signedPct(b)} · ${gap >= 0 ? `+${g}` : `−${g}`} pt ${gap >= 0 ? 'devant' : 'derrière'} l'indice`;
   },
 
   renderPerfCharts() {
@@ -1971,9 +2103,11 @@ const App = {
           : 'Touchez « Actualiser le cours » pour charger l\'historique et afficher la courbe.';
         return;
       }
-      const o = App.perfChartOpts(ps);
+      const o = App.perfChartOpts(ps, null, purchases.filter((p) => Calc.normTicker(p.ticker) === ticker));
       el.setAttribute('aria-label', `Performance de ${ticker} depuis le premier achat`);
       drawChart(el, o);
+      const note = el.parentElement.querySelector('[data-f=perf-bench]');
+      if (note) { note.textContent = App.benchVerdict(ps, o.bench); note.hidden = !note.textContent; }
     });
 
     // Total du portefeuille
@@ -1983,6 +2117,7 @@ const App = {
     const hint = document.getElementById('chart-perf-hint');
     el.hidden = ps.length < 2;
     hint.hidden = ps.length >= 2 || !purchases.length;
+    document.getElementById('chart-perf-bench').hidden = true;
     if (ps.length < 2) {
       el.replaceChildren();
       hint.textContent = 'Actualisez les cours de chaque titre pour charger leur historique : la courbe s\'affichera ensuite.';
@@ -1991,7 +2126,11 @@ const App = {
     const last = ps[ps.length - 1];
     document.getElementById('chart-perf-now').textContent = `${Fmt.signedPct(last.pct)} · ${Fmt.signedEur(last.pv)}`;
     document.getElementById('chart-perf-now').className = 'perf-now ' + Fmt.trend(last.pv);
-    drawChart(el, App.perfChartOpts(ps));
+    const o = App.perfChartOpts(ps, null, purchases);
+    drawChart(el, o);
+    const note = document.getElementById('chart-perf-bench');
+    note.textContent = App.benchVerdict(ps, o.bench);
+    note.hidden = !note.textContent;
   },
 
   /* ---------- Achats ---------- */
@@ -2788,6 +2927,13 @@ const App = {
 
     document.getElementById('btn-export').addEventListener('click', App.exportJSON);
     document.getElementById('import-file').addEventListener('change', App.importJSON);
+    const pick = document.getElementById('bench-select');
+    pick.value = App.state.settings.benchmark || '';
+    pick.addEventListener('change', () => {
+      App.state.settings.benchmark = pick.value;
+      App.persist();
+      App.renderPerfCharts();
+    });
     const auto = document.getElementById('set-autorefresh');
     auto.checked = App.state.settings.autoRefresh;
     auto.addEventListener('change', () => {
@@ -2937,6 +3083,7 @@ const App = {
         App.bindSimulatorValues();
         App.fillPlannerValues();
         document.getElementById('set-autorefresh').checked = data.settings.autoRefresh;
+        document.getElementById('bench-select').value = data.settings.benchmark || '';
         App.liveStatus = {};
         App.renderAll();
         App.toast('Sauvegarde importée');
