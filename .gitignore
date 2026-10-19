@@ -10,3 +10,8 @@ node_modules/
 
 # Vidéos (lourdes, hors dépôt)
 *.mp4
+
+# Serveur MCP local : environnement Python et dossier d'exports (jamais sur GitHub)
+mcp-budget/.venv/
+__pycache__/
+budget-data/
