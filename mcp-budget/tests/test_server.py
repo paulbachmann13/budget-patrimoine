@@ -50,8 +50,11 @@ def main():
         Path(d, "pea-2026-03-31.json").write_text(json.dumps(PEA))
 
         r = server.resume_budget("2026-03")
-        approx(r["revenus"], 2000); approx(r["aide_recue"], 150); approx(r["depenses"], 697.5)
-        approx(r["solde"], 1452.5); assert r["operations_a_categoriser"] == 1
+        approx(r["revenus"], 2150); approx(r["dont_aide_recue"], 150); approx(r["depenses"], 697.5)
+        approx(r["solde"], 1452.5)
+        # un virement sortant en catégorie de revenu se compense avec les revenus (règle de l'appli)
+        b2 = dict(BUDGET, transactions=BUDGET["transactions"] + [{"id": "9", "date": "2026-03-11", "label": "WERO", "amount": -50, "category": "Salaire"}])
+        approx(server._summary(b2, "2026-03")["revenus"], 2100); assert r["operations_a_categoriser"] == 1
         print("OK  resume_budget", r)
 
         assert "erreur" in server.resume_budget("2025-01") and "2026-02" in server.resume_budget("2025-01")["erreur"]

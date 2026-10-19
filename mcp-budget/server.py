@@ -147,33 +147,51 @@ def _kinds(b: dict[str, Any]) -> dict[str, str]:
 
 # --------------------------------------------------------------------------- budget
 
-def _summary(b: dict[str, Any], month: str) -> dict[str, Any]:
+def _kind(kinds: dict[str, str], cat: str, amt: float) -> str:
+    if cat == UNCATEGORIZED:
+        return "revenu" if amt > 0 else "depense"
+    return kinds.get(cat, "depense")
+
+
+def _month_totals(b: dict[str, Any], month: str) -> dict[str, Any]:
+    """Même règle que BudgetCore.summarizeMonth de l'appli : le type de la catégorie décide,
+    les montants se compensent dans leur catégorie (un virement sortant rangé en « Remboursement »
+    réduit les revenus ; un remboursement reçu en catégorie de dépense réduit la dépense)."""
     kinds = _kinds(b)
-    income = aid = spend = neutral = 0.0
+    income = aid = expense = neutral = 0.0
+    by_cat: dict[str, float] = {}
     uncategorized = 0
     for t in b.get("transactions", []):
         if t["date"][:7] != month:
             continue
         cat, amt = t.get("category", UNCATEGORIZED), float(t["amount"])
-        if cat == UNCATEGORIZED:
-            uncategorized += 1
-        kind = kinds.get(cat, "depense")
+        uncategorized += cat == UNCATEGORIZED
+        kind = _kind(kinds, cat, amt)
         if kind == NEUTRAL:
             neutral += amt
-        elif kind == AID and amt > 0:
-            aid += amt
-        elif amt > 0:
+            continue
+        by_cat[cat] = by_cat.get(cat, 0.0) + amt
+        if kind in ("revenu", AID):
             income += amt
+            if kind == AID:
+                aid += amt
         else:
-            spend += -amt
+            expense -= amt
+    spending = {c: -v for c, v in by_cat.items() if _kind(kinds, c, v) == "depense" and v < 0}
+    return {"income": income, "aid": aid, "expense": expense, "neutral": neutral,
+            "uncategorized": uncategorized, "spending": spending}
+
+
+def _summary(b: dict[str, Any], month: str) -> dict[str, Any]:
+    t = _month_totals(b, month)
     return {
         "mois": month,
-        "revenus": _r(income),
-        "aide_recue": _r(aid),
-        "depenses": _r(spend),
-        "solde": _r(income + aid - spend),
-        "mouvements_neutres_exclus": _r(neutral),
-        "operations_a_categoriser": uncategorized,
+        "revenus": _r(t["income"]),
+        "dont_aide_recue": _r(t["aid"]),
+        "depenses": _r(t["expense"]),
+        "solde": _r(t["income"] - t["expense"]),
+        "mouvements_neutres_exclus": _r(t["neutral"]),
+        "operations_a_categoriser": t["uncategorized"],
     }
 
 
@@ -233,14 +251,7 @@ def depenses_par_categorie(mois: str | None = None) -> dict[str, Any]:
     try:
         b = _budget()
         month = _month(mois, b.get("transactions", []))
-        kinds = _kinds(b)
-        totals: dict[str, float] = {}
-        for t in b.get("transactions", []):
-            if t["date"][:7] != month:
-                continue
-            cat, amt = t.get("category", UNCATEGORIZED), float(t["amount"])
-            if amt < 0 and kinds.get(cat, "depense") == "depense":
-                totals[cat] = totals.get(cat, 0.0) - amt
+        totals = _month_totals(b, month)["spending"]
         budgets = b.get("budgets", {})
         rows = []
         for cat, total in sorted(totals.items(), key=lambda kv: -kv[1]):
