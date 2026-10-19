@@ -476,6 +476,192 @@ def patrimoine_total() -> dict[str, Any]:
         return {"erreur": f"Fichier inattendu ({type(e).__name__}: {e})."}
 
 
+# --------------------------------------------------------------------------- écriture PEA (aperçu → confirmation)
+
+import copy
+import secrets
+import time
+import uuid
+
+_pending: dict[str, dict[str, Any]] = {}
+PENDING_TTL = 15 * 60
+ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _need_cloud() -> None:
+    if not vault.configured():
+        raise DataError("L'écriture n'est possible qu'avec la synchro Supabase (variables SUPABASE_* non configurées).")
+
+
+def _resolve_ticker(pea: dict[str, Any], ticker: str | None, isin: str | None) -> str:
+    if ticker and ticker.strip():
+        return _ticker(ticker)
+    if isin and isin.strip():
+        code = isin.strip().upper()
+        for t, ins in (pea.get("instruments") or {}).items():
+            if str((ins or {}).get("isin", "")).upper() == code:
+                return t
+        alias = _ticker(code)
+        if alias != code:
+            return alias
+        raise DataError(f"ISIN {code} inconnu de l'appli : indiquez aussi le ticker (ex. DCAM).")
+    raise DataError("Indiquez le ticker (ou l'ISIN).")
+
+
+def _held(pea: dict[str, Any], ticker: str) -> float:
+    return next((p["quantite"] for p in _pea_report(pea)["positions"] if p["titre"] == ticker), 0.0)
+
+
+def _check_date(d: str | None) -> str:
+    d = d or date.today().isoformat()
+    if not ISO.fullmatch(d):
+        raise DataError(f"Date invalide « {d} » : utilisez AAAA-MM-JJ.")
+    try:
+        parsed = date.fromisoformat(d)
+    except ValueError:
+        raise DataError(f"Date inexistante « {d} ».") from None
+    if parsed > date.today():
+        raise DataError(f"La date {d} est dans le futur.")
+    return d
+
+
+def _num(v: Any, name: str, *, positive: bool = True) -> float:
+    try:
+        x = float(str(v).replace(",", ".").replace(" ", ""))
+    except ValueError:
+        raise DataError(f"{name} invalide : « {v} ».") from None
+    if not (x > 0 if positive else x >= 0) or x != x or x in (float("inf"),):
+        raise DataError(f"{name} doit être {'> 0' if positive else '>= 0'} (reçu : {v}).")
+    return x
+
+
+def _apply(pea: dict[str, Any], kind: str, rec: dict[str, Any]) -> None:
+    key = {"achat": "purchases", "vente": "sales", "versement": "deposits"}[kind]
+    pea.setdefault(key, []).append(rec)
+
+
+def _duplicate(pea: dict[str, Any], kind: str, rec: dict[str, Any]) -> bool:
+    key = {"achat": "purchases", "vente": "sales", "versement": "deposits"}[kind]
+    fields = ("date", "amount") if kind == "versement" else ("date", "ticker", "qty", "price")
+    return any(all(x.get(f) == rec[f] for f in fields) for x in pea.get(key, []))
+
+
+def _preview(kind: str, rec: dict[str, Any], allow_dup: bool) -> dict[str, Any]:
+    _need_cloud()
+    d = vault.fetch()
+    pea = d.get("pea")
+    if pea is None:
+        raise DataError("Aucune donnée PEA dans la synchro.")
+    pea = copy.deepcopy(pea)
+    warnings: list[str] = []
+    if kind in ("achat", "vente"):
+        known = rec["ticker"] in {p["titre"] for p in _pea_report(pea)["positions"]} or rec["ticker"] in (pea.get("instruments") or {}) or rec["ticker"] in (pea.get("prices") or {})
+        if kind == "vente" and _held(pea, rec["ticker"]) + 1e-9 < rec["qty"]:
+            raise DataError(f"Vente impossible : vous détenez {_held(pea, rec['ticker'])} {rec['ticker']} et la vente en porte {rec['qty']}.")
+        if kind == "achat" and not known:
+            warnings.append(f"« {rec['ticker']} » est un nouveau titre : tant que l'appli n'a pas de cours, il est valorisé au prix d'achat.")
+    if _duplicate(pea, kind, rec):
+        if not allow_dup:
+            raise DataError("Une opération identique existe déjà (même date, titre, quantité et prix). Doublon ? "
+                            "Si c'est bien une 2e opération identique, redemandez avec autoriser_doublon=True.")
+        warnings.append("Opération identique déjà présente : ajoutée à la demande de l'utilisateur.")
+    before = _pea_report(pea)
+    _apply(pea, kind, rec)
+    after = _pea_report(pea)
+    if after["liquidites"] is not None and after["liquidites"] < 0:
+        warnings.append(f"Liquidités du PEA négatives après l'opération ({after['liquidites']} €) : un versement a peut-être été oublié.")
+    code = secrets.token_hex(3)
+    for c in [c for c, p in _pending.items() if time.time() - p["ts"] > PENDING_TTL]:
+        del _pending[c]
+    _pending[code] = {"kind": kind, "rec": rec, "allow_dup": allow_dup, "ts": time.time()}
+    out: dict[str, Any] = {
+        "a_ajouter": {"type": kind, **rec},
+        "avant": {"liquidites": before["liquidites"], "total_pea": before["total_pea"]},
+        "apres": {"liquidites": after["liquidites"], "total_pea": after["total_pea"]},
+        "avertissements": warnings,
+        "code_confirmation": code,
+        "important": "RIEN n'est encore écrit. Montrez ce récapitulatif à l'utilisateur et appelez confirmer_ajout "
+                     "avec le code UNIQUEMENT après son accord explicite.",
+    }
+    if kind in ("achat", "vente"):
+        pos = next((p for p in after["positions"] if p["titre"] == rec["ticker"]), None)
+        out["position_apres"] = pos and {"quantite": pos["quantite"], "pru": pos["pru"]}
+    return out
+
+
+@mcp.tool()
+def proposer_achat(ticker: str | None = None, quantite: float = 0, prix: float = 0, date_achat: str | None = None,
+                   frais: float = 0, isin: str | None = None, autoriser_doublon: bool = False) -> dict[str, Any]:
+    """PRÉPARE l'ajout d'un achat au PEA (rien n'est écrit). Renvoie un récapitulatif et un code à valider avec
+    confirmer_ajout. `prix` = prix unitaire en €, `quantite` = nombre de parts, `frais` = frais de courtage en €
+    (0 si inconnus), `date_achat` = AAAA-MM-JJ (défaut : aujourd'hui), `ticker` (ex. DCAM) ou `isin`.
+    Depuis une photo/capture d'avis d'exécution : lisez titre, quantité, prix, frais et date, puis proposez."""
+    try:
+        _need_cloud()
+        pea = vault.fetch().get("pea") or {}
+        rec = {"id": str(uuid.uuid4()), "date": _check_date(date_achat), "ticker": _resolve_ticker(pea, ticker, isin),
+               "qty": _num(quantite, "quantité"), "price": _num(prix, "prix"), "fees": _num(frais, "frais", positive=False)}
+        return _preview("achat", rec, autoriser_doublon)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def proposer_vente(ticker: str | None = None, quantite: float = 0, prix: float = 0, date_vente: str | None = None,
+                   frais: float = 0, isin: str | None = None, autoriser_doublon: bool = False) -> dict[str, Any]:
+    """PRÉPARE l'ajout d'une vente au PEA (rien n'est écrit). Refusée si vous ne détenez pas assez de parts.
+    Mêmes paramètres que proposer_achat ; la plus-value est calculée au PRU par l'appli."""
+    try:
+        _need_cloud()
+        pea = vault.fetch().get("pea") or {}
+        rec = {"id": str(uuid.uuid4()), "date": _check_date(date_vente), "ticker": _resolve_ticker(pea, ticker, isin),
+               "qty": _num(quantite, "quantité"), "price": _num(prix, "prix"), "fees": _num(frais, "frais", positive=False)}
+        return _preview("vente", rec, autoriser_doublon)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def proposer_versement(montant: float = 0, date_versement: str | None = None, autoriser_doublon: bool = False) -> dict[str, Any]:
+    """PRÉPARE l'ajout d'un versement d'argent sur le PEA (rien n'est écrit). `montant` en €."""
+    try:
+        rec = {"id": str(uuid.uuid4()), "date": _check_date(date_versement), "amount": _num(montant, "montant")}
+        return _preview("versement", rec, autoriser_doublon)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def confirmer_ajout(code_confirmation: str) -> dict[str, Any]:
+    """ÉCRIT dans la synchro l'opération préparée par proposer_achat / proposer_vente / proposer_versement.
+    À n'appeler qu'APRÈS l'accord explicite de l'utilisateur sur le récapitulatif. Le code expire après 15 minutes.
+    Une sauvegarde chiffrée est faite avant l'écriture ; l'appli récupère l'ajout à sa prochaine synchro (≈ 1 min)."""
+    p = _pending.get((code_confirmation or "").strip())
+    if not p or time.time() - p["ts"] > PENDING_TTL:
+        return {"erreur": "Code inconnu ou expiré : refaites la proposition."}
+    kind, rec = p["kind"], p["rec"]
+
+    def modify(data: dict[str, Any]) -> dict[str, Any]:
+        pea = data.get("pea")
+        if pea is None:
+            raise vault.VaultError("Aucune donnée PEA dans le coffre.")
+        if kind == "vente" and _held(pea, rec["ticker"]) + 1e-9 < rec["qty"]:
+            raise vault.VaultError("Vente refusée : les parts détenues ont changé entre-temps.")
+        if _duplicate(pea, kind, rec) and not p["allow_dup"]:
+            raise vault.VaultError("Opération déjà présente (doublon) : rien n'a été écrit.")
+        _apply(pea, kind, rec)
+        return {"ecrit": {"type": kind, **rec}}
+
+    try:
+        _need_cloud()
+        res = vault.update(modify)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+    del _pending[code_confirmation.strip()]
+    return {**res, "message": "Ajouté. L'appli le récupère à sa prochaine synchro (ouvrez-la ou attendez ~1 min).",
+            "pea_apres": _pea_report(vault.fetch().get("pea") or {})["total_pea"]}
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

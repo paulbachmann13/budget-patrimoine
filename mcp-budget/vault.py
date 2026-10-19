@@ -14,11 +14,15 @@ Configuration (aucun secret en dur) :
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import time
+from datetime import datetime
+from pathlib import Path
 import unicodedata
 import urllib.error
 import urllib.request
@@ -63,13 +67,16 @@ def _secret(account: str, env_var: str) -> str:
     )
 
 
-def _request(path: str, *, body: dict | None = None, bearer: str | None = None) -> Any:
+def _request(path: str, *, body: dict | None = None, bearer: str | None = None,
+             method: str | None = None, prefer: str | None = None) -> Any:
     base = os.environ["SUPABASE_URL"].rstrip("/")
     headers = {"apikey": os.environ["SUPABASE_KEY"], "Content-Type": "application/json"}
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
+    if prefer:
+        headers["Prefer"] = prefer
     req = urllib.request.Request(
-        base + path, headers=headers, method="POST" if body is not None else "GET",
+        base + path, headers=headers, method=method or ("POST" if body is not None else "GET"),
         data=json.dumps(body).encode() if body is not None else None,
     )
     try:
@@ -124,3 +131,62 @@ def fetch() -> dict[str, Any]:
     data["_updated_at"] = row.get("updated_at")
     _cache.update(at=time.time(), data=data)
     return data
+
+
+# --------------------------------------------------------------------------- écriture (ajouts uniquement)
+
+BACKUP_KEEP = 30
+
+
+def _key(row: dict[str, Any], passphrase: str) -> bytes:
+    return hashlib.pbkdf2_hmac(
+        "sha256", unicodedata.normalize("NFC", passphrase).encode("utf-8"), base64.b64decode(row["salt"]), int(row["iterations"]), dklen=32
+    )
+
+
+def _backup(row: dict[str, Any]) -> Path:
+    """Copie chiffrée de l'état AVANT écriture, au format « sauvegarde chiffrée » de l'appli
+    (importable telle quelle : Patrimoine → Importer une sauvegarde chiffrée). Rien n'est stocké en clair."""
+    d = Path(os.environ.get("BUDGET_DATA_DIR", "~/Documents/budget-data")).expanduser() / "sauvegardes"
+    d.mkdir(parents=True, exist_ok=True)
+    env = {
+        "format": "budget-patrimoine-chiffre", "v": 1,
+        "kdf": {"name": "PBKDF2", "hash": "SHA-256", "iterations": int(row["iterations"]), "salt": row["salt"]},
+        "cipher": "AES-GCM", "iv": row["iv"], "data": row["data"],
+    }
+    path = d / f"coffre-{datetime.now():%Y%m%d-%H%M%S}-rev{row['rev']}.json"
+    path.write_text(json.dumps(env), encoding="utf-8")
+    path.chmod(0o600)
+    for old in sorted(d.glob("coffre-*.json"))[:-BACKUP_KEEP]:
+        old.unlink()
+    return path
+
+
+def update(modify) -> dict[str, Any]:
+    """Lit le coffre à jour, sauvegarde, applique `modify(data)` (qui ajoute des éléments et renvoie un
+    résumé), rechiffre avec la clé d'origine et écrit avec contrôle de version (`rev`).
+    Refusé (sans rien écrire) si un autre appareil a écrit entre la lecture et l'écriture."""
+    token, uid = _access_token()
+    rows = _request(f"/rest/v1/vault?select=salt,iterations,iv,data,rev&user_id=eq.{uid}", bearer=token)
+    if not rows:
+        raise VaultError("Aucune donnée synchronisée : ouvrez l'appli et lancez une synchronisation d'abord.")
+    row = rows[0]
+    passphrase = _secret("passphrase", "SUPABASE_PASSPHRASE").replace("\r", "")
+    data = decrypt_row(row, passphrase)
+    before = copy.deepcopy(data)
+    summary = modify(data)
+    if data == before:
+        raise VaultError("Aucune modification à écrire.")
+    backup = _backup(row)
+    iv = secrets.token_bytes(12)
+    cipher = AESGCM(_key(row, passphrase)).encrypt(iv, json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), None)
+    rev = int(row["rev"])
+    written = _request(
+        f"/rest/v1/vault?user_id=eq.{uid}&rev=eq.{rev}", method="PATCH", bearer=token, prefer="return=representation",
+        body={"iv": base64.b64encode(iv).decode(), "data": base64.b64encode(cipher).decode(), "rev": rev + 1,
+              "device": "Claude (MCP)", "updated_at": datetime.utcnow().isoformat() + "Z"},
+    )
+    if not written:
+        raise VaultError("Écriture annulée : le coffre a été modifié par un autre appareil entre-temps. Rien n'a été changé, réessayez.")
+    _cache.update(at=0.0, data=None)
+    return {**summary, "sauvegarde_avant": backup.name, "version": rev + 1}
