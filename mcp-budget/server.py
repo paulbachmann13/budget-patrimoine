@@ -691,6 +691,149 @@ def confirmer_ajout(code_confirmation: str) -> dict[str, Any]:
             "pea_apres": _pea_report(vault.fetch().get("pea") or {})["total_pea"]}
 
 
+# --------------------------------------------------------------------------- modification d'une ligne existante
+# Même logique que les ajouts : aperçu, accord de l'utilisateur, sauvegarde chiffrée, contrôle de version.
+# Aucune suppression : on ne peut que corriger les champs d'une ligne identifiée par son id.
+
+_TYPE_OF = {v: k for k, v in _KEYS.items()}
+_FIELDS = {"achat": ("date", "ticker", "qty", "price", "fees"), "vente": ("date", "ticker", "qty", "price", "fees"),
+           "versement": ("date", "amount"), "mouvement": ("date", "amount", "kind", "ticker")}
+_pending_mod: dict[str, dict[str, Any]] = {}
+
+
+def _locate(pea: dict[str, Any], op_id: str) -> tuple[str, dict[str, Any]]:
+    for key, kind in _TYPE_OF.items():
+        for rec in pea.get(key) or []:
+            if rec.get("id") == op_id:
+                return kind, rec
+    raise DataError(f"Aucune opération PEA avec l'id « {op_id} » (voir lister_operations_pea).")
+
+
+def _oversold(pea: dict[str, Any]) -> set[str]:
+    """Titres dont une vente dépasse les parts détenues à sa date (rejeu chronologique, comme le rapport PEA)."""
+    events = [("b", x) for x in pea.get("purchases", [])] + [("s", x) for x in pea.get("sales", [])]
+    events.sort(key=lambda e: (e[1]["date"], 0 if e[0] == "b" else 1))
+    held: dict[str, float] = {}
+    bad: set[str] = set()
+    for kind, e in events:
+        t = _ticker(e["ticker"])
+        held[t] = held.get(t, 0.0) + (e["qty"] if kind == "b" else -e["qty"])
+        if held[t] < -1e-9:
+            bad.add(t)
+    return bad
+
+
+def _check_pea(before: dict[str, Any], pea: dict[str, Any]) -> list[str]:
+    """Contrôles après modification (`before` = état d'origine) : refuse de créer une vente excessive."""
+    new = _oversold(pea) - _oversold(before)
+    if new:
+        raise DataError(f"Modification refusée : une vente de {', '.join(sorted(new))} dépasserait les parts détenues à sa date.")
+    rep = _pea_report(pea)
+    if rep["liquidites"] is not None and rep["liquidites"] < 0:
+        return [f"Liquidités du PEA négatives après la modification ({rep['liquidites']} €)."]
+    return []
+
+
+@mcp.tool()
+@_tag
+def lister_operations_pea() -> dict[str, Any]:
+    """Liste toutes les opérations du PEA (achats, ventes, versements, mouvements) avec leur `id`,
+    nécessaire pour proposer_modification."""
+    pea = _pea()
+    return {"operations": [{"type": _TYPE_OF[k], **r} for k in _KEYS.values() for r in pea.get(k) or []]}
+
+
+@mcp.tool()
+def proposer_modification(id_operation: str, date: str | None = None, quantite: float | None = None,
+                          prix: float | None = None, frais: float | None = None, montant: float | None = None,
+                          ticker: str | None = None, type_mouvement: str | None = None) -> dict[str, Any]:
+    """PRÉPARE la correction d'une ligne existante du PEA (rien n'est écrit). `id_operation` vient de
+    lister_operations_pea. Ne renseignez QUE les champs à changer : `date` (AAAA-MM-JJ), `quantite`, `prix`,
+    `frais` (achat/vente), `montant` (versement/mouvement), `ticker`, `type_mouvement` (mouvement).
+    Renvoie avant/après et un code à valider avec confirmer_modification. Pas de suppression."""
+    try:
+        _need_cloud()
+        pea = copy.deepcopy(vault.fetch().get("pea") or {})
+        kind, rec = _locate(pea, id_operation.strip())
+        before_rec = copy.deepcopy(rec)
+        origin = copy.deepcopy(pea)
+        before = _pea_report(pea)
+        wanted = {"date": date, "qty": quantite, "price": prix, "fees": frais, "amount": montant,
+                  "ticker": ticker, "kind": type_mouvement}
+        changes: dict[str, Any] = {}
+        for f, v in wanted.items():
+            if v is None:
+                continue
+            if f not in _FIELDS[kind]:
+                raise DataError(f"Le champ « {f} » ne s'applique pas à une opération de type {kind}.")
+            if f == "date":
+                v = _check_date(v)
+            elif f in ("qty", "price", "amount"):
+                v = _num(v, f)
+            elif f == "fees":
+                v = _num(v, f, positive=False)
+            elif f == "ticker":
+                v = _resolve_ticker(pea, v, None)
+            elif f == "kind":
+                v = MOVE_KINDS.get(str(v).strip().lower())
+                if not v:
+                    raise DataError("type_mouvement inconnu : choisissez regularisation, frais, retrait ou dividende.")
+            if rec.get(f) != v:
+                changes[f] = v
+        if not changes:
+            raise DataError("Aucun changement : les valeurs demandées sont déjà celles de la ligne.")
+        rec.update(changes)
+        if kind == "mouvement" and rec["kind"] == "dividende" and not rec.get("ticker"):
+            raise DataError("Un dividende demande le ticker du titre concerné.")
+        warnings = _check_pea(origin, pea)
+        after = _pea_report(pea)
+        code = secrets.token_hex(3)
+        for c in [c for c, p in _pending_mod.items() if time.time() - p["ts"] > PENDING_TTL]:
+            del _pending_mod[c]
+        _pending_mod[code] = {"id": id_operation.strip(), "kind": kind, "before": before_rec, "changes": changes, "ts": time.time()}
+        return {
+            "operation": {"type": kind, "avant": before_rec, "apres": rec},
+            "avant": {"liquidites": before["liquidites"], "total_pea": before["total_pea"]},
+            "apres": {"liquidites": after["liquidites"], "total_pea": after["total_pea"]},
+            "avertissements": warnings,
+            "code_confirmation": code,
+            "important": "RIEN n'est encore écrit. Montrez ce récapitulatif à l'utilisateur et appelez "
+                         "confirmer_modification avec le code UNIQUEMENT après son accord explicite.",
+        }
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def confirmer_modification(code_confirmation: str) -> dict[str, Any]:
+    """ÉCRIT la correction préparée par proposer_modification, après l'accord explicite de l'utilisateur.
+    Refusée si la ligne a changé entre-temps. Sauvegarde chiffrée avant écriture ; code valable 15 minutes."""
+    p = _pending_mod.get((code_confirmation or "").strip())
+    if not p or time.time() - p["ts"] > PENDING_TTL:
+        return {"erreur": "Code inconnu ou expiré : refaites la proposition."}
+
+    def modify(data: dict[str, Any]) -> dict[str, Any]:
+        pea = data.get("pea")
+        if pea is None:
+            raise vault.VaultError("Aucune donnée PEA dans le coffre.")
+        origin = copy.deepcopy(pea)
+        kind, rec = _locate(pea, p["id"])
+        if rec != p["before"]:
+            raise vault.VaultError("La ligne a été modifiée entre-temps : rien n'a été écrit, refaites la proposition.")
+        rec.update(p["changes"])
+        _check_pea(origin, pea)
+        return {"modifie": {"type": kind, "avant": p["before"], "apres": rec}}
+
+    try:
+        _need_cloud()
+        res = vault.update(modify)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+    del _pending_mod[code_confirmation.strip()]
+    return {**res, "message": "Modifié. L'appli le récupère à sa prochaine synchro (ouvrez-la ou attendez ~1 min).",
+            "pea_apres": _pea_report(vault.fetch().get("pea") or {})["total_pea"]}
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

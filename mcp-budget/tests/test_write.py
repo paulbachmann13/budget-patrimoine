@@ -113,4 +113,31 @@ for bad in (("truc", 1), ("frais", -1), ("dividende", 1)):
     assert "erreur" in server.proposer_mouvement(*bad), bad
 fresh(); assert "doublon" in server.proposer_mouvement("credit", 2.2, "2026-03-04")["erreur"].lower()
 print("OK  régularisation : espèces +2,20 €, versements/plafond inchangés, relue par sync.js")
+
+# 10. modification d'une ligne existante (aperçu, écriture, relecture par sync.js, garde-fous)
+fresh(); ops = server.lister_operations_pea()["operations"]
+reg = next(o for o in ops if o["type"] == "mouvement"); ach = next(o for o in ops if o["id"] == "p1")
+fresh(); before = server.valeur_pea(); rev0 = state["row"]["rev"]
+m = server.proposer_modification(reg["id"], date="2026-03-03")
+assert m["operation"]["avant"]["date"] == "2026-03-04" and m["operation"]["apres"]["date"] == "2026-03-03", m
+assert state["row"]["rev"] == rev0, "l'aperçu ne doit rien écrire"
+r = server.confirmer_modification(m["code_confirmation"]); assert r.get("version") == rev0 + 1, r
+mv = node("row", state["row"])["pea"]["moves"]
+assert [x for x in mv if x["id"] == reg["id"]][0]["date"] == "2026-03-03" and len(mv) == 1
+assert "erreur" in server.confirmer_modification(m["code_confirmation"]), "un code ne sert qu'une fois"
+fresh(); assert abs(server.valeur_pea()["liquidites"] - before["liquidites"]) < 1e-9, "changer une date ne change pas les espèces"
+fresh(); m2 = server.proposer_modification("p1", prix=101, frais=2.5)
+assert abs((m2["apres"]["liquidites"] - m2["avant"]["liquidites"]) - (-(1 * 10) + 2.5)) < 0.001, m2
+server.confirmer_modification(m2["code_confirmation"])
+pa = node("row", state["row"])["pea"]["purchases"]; assert [x for x in pa if x["id"] == "p1"][0]["price"] == 101
+fresh(); assert "erreur" in server.proposer_modification("inconnu", date="2026-03-01")
+fresh(); assert "erreur" in server.proposer_modification("p1", date="2026-03-01", montant=5), "champ hors type"
+fresh(); assert "erreur" in server.proposer_modification("p1"), "aucun changement"
+fresh(); assert "erreur" in server.proposer_modification("p1", prix=101), "valeur identique"
+fresh(); assert "erreur" in server.proposer_modification("s1", quantite=999), "vente excessive"
+fresh(); assert "erreur" in server.proposer_modification("p1", date="2999-01-01")
+fresh(); m3 = server.proposer_modification("p2", frais=9)
+fresh(); m4 = server.proposer_modification("p2", frais=7); server.confirmer_modification(m4["code_confirmation"])
+fresh(); assert "modifiée entre-temps" in server.confirmer_modification(m3["code_confirmation"])["erreur"]
+print("OK  modification : aperçu, écriture, relue par sync.js, garde-fous (id, champ, vente, date, ligne changée)")
 print("\nTous les tests passent.")
