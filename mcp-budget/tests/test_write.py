@@ -100,4 +100,17 @@ fresh(); v = server.proposer_versement(montant=100)  # sert juste à tester que 
 fresh(); a = server.proposer_achat(ticker="DCAM", quantite=100, prix=100)
 assert any("négatives" in w for w in a["avertissements"]), a
 print("OK  avertissement liquidités négatives")
+# 9. régularisation : +2,20 € d'espèces, hors plafond ; écrite puis relue par le vrai sync.js
+fresh(); before = server.valeur_pea()
+m = server.proposer_mouvement("Régularisation", 2.2, "2026-03-04")
+assert m["a_ajouter"]["kind"] == "credit" and abs(m["apres"]["liquidites"] - m["avant"]["liquidites"] - 2.2) < 0.001, m
+r = server.confirmer_ajout(m["code_confirmation"]); assert r.get("version"), r
+mv = node("row", state["row"])["pea"]["moves"]
+assert mv[-1]["kind"] == "credit" and mv[-1]["amount"] == 2.2
+fresh(); after = server.valeur_pea()
+assert abs(after["liquidites"] - before["liquidites"] - 2.2) < 0.001 and after["versements_total"] == before["versements_total"]
+for bad in (("truc", 1), ("frais", -1), ("dividende", 1)):
+    assert "erreur" in server.proposer_mouvement(*bad), bad
+fresh(); assert "doublon" in server.proposer_mouvement("credit", 2.2, "2026-03-04")["erreur"].lower()
+print("OK  régularisation : espèces +2,20 €, versements/plafond inchangés, relue par sync.js")
 print("\nTous les tests passent.")

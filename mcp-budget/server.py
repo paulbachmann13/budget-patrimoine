@@ -535,14 +535,17 @@ def _num(v: Any, name: str, *, positive: bool = True) -> float:
     return x
 
 
+_KEYS = {"achat": "purchases", "vente": "sales", "versement": "deposits", "mouvement": "moves"}
+
+
 def _apply(pea: dict[str, Any], kind: str, rec: dict[str, Any]) -> None:
-    key = {"achat": "purchases", "vente": "sales", "versement": "deposits"}[kind]
+    key = _KEYS[kind]
     pea.setdefault(key, []).append(rec)
 
 
 def _duplicate(pea: dict[str, Any], kind: str, rec: dict[str, Any]) -> bool:
-    key = {"achat": "purchases", "vente": "sales", "versement": "deposits"}[kind]
-    fields = ("date", "amount") if kind == "versement" else ("date", "ticker", "qty", "price")
+    key = _KEYS[kind]
+    fields = {"versement": ("date", "amount"), "mouvement": ("date", "amount", "kind")}.get(kind, ("date", "ticker", "qty", "price"))
     return any(all(x.get(f) == rec[f] for f in fields) for x in pea.get(key, []))
 
 
@@ -631,9 +634,35 @@ def proposer_versement(montant: float = 0, date_versement: str | None = None, au
         return {"erreur": str(e)}
 
 
+MOVE_KINDS = {"credit": "credit", "regularisation": "credit", "régularisation": "credit", "frais": "frais",
+              "retrait": "retrait", "dividende": "dividende"}
+
+
+@mcp.tool()
+def proposer_mouvement(type_mouvement: str, montant: float, date_mouvement: str | None = None,
+                       ticker: str | None = None, autoriser_doublon: bool = False) -> dict[str, Any]:
+    """PRÉPARE l'ajout d'un autre mouvement d'argent du PEA (rien n'est écrit) ; `montant` toujours positif, en €.
+    `type_mouvement` : « regularisation » (régularisation de frais / crédit de la banque, ex. REGUL.FR.BOURSE, + espèces),
+    « frais » (frais prélevés, − espèces), « retrait » (− espèces), « dividende » (+ espèces, `ticker` obligatoire).
+    Ne compte pas dans le plafond de versements (contrairement à proposer_versement)."""
+    try:
+        kind = MOVE_KINDS.get(str(type_mouvement).strip().lower())
+        if not kind:
+            raise DataError("type_mouvement inconnu : choisissez regularisation, frais, retrait ou dividende.")
+        rec = {"id": str(uuid.uuid4()), "date": _check_date(date_mouvement), "amount": _num(montant, "montant"), "kind": kind}
+        if kind == "dividende":
+            _need_cloud()
+            if not (ticker and ticker.strip()):
+                raise DataError("Un dividende demande le ticker du titre concerné.")
+            rec["ticker"] = _resolve_ticker(vault.fetch().get("pea") or {}, ticker, None)
+        return _preview("mouvement", rec, autoriser_doublon)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
 @mcp.tool()
 def confirmer_ajout(code_confirmation: str) -> dict[str, Any]:
-    """ÉCRIT dans la synchro l'opération préparée par proposer_achat / proposer_vente / proposer_versement.
+    """ÉCRIT dans la synchro l'opération préparée par proposer_achat / proposer_vente / proposer_versement / proposer_mouvement.
     À n'appeler qu'APRÈS l'accord explicite de l'utilisateur sur le récapitulatif. Le code expire après 15 minutes.
     Une sauvegarde chiffrée est faite avant l'écriture ; l'appli récupère l'ajout à sa prochaine synchro (≈ 1 min)."""
     p = _pending.get((code_confirmation or "").strip())

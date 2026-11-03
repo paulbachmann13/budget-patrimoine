@@ -34,4 +34,4 @@ Patrimoine → Importer une sauvegarde chiffrée) ; écriture avec contrôle de 
 a écrit entre-temps. L'appli récupère l'ajout à sa prochaine synchro (~1 min). Tests : `tests/test_write.py`.
 
 ## Outils
-`etat_donnees`, `resume_budget`, `depenses_par_categorie`, `rechercher_operations`, `plafonds_budget`, `valeur_pea`, `patrimoine_total` (lecture) ; `proposer_achat`, `proposer_vente`, `proposer_versement`, `confirmer_ajout` (écriture PEA).
+`etat_donnees`, `resume_budget`, `depenses_par_categorie`, `rechercher_operations`, `plafonds_budget`, `valeur_pea`, `patrimoine_total` (lecture) ; `proposer_achat`, `proposer_vente`, `proposer_versement`, `proposer_mouvement` (régularisation, frais, retrait, dividende), `confirmer_ajout` (écriture PEA).
