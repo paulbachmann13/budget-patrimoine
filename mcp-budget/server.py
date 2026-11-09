@@ -296,7 +296,7 @@ def rechercher_operations(
             "total_trouve": len(found),
             "somme": _r(sum(float(t["amount"]) for t in found)),
             "operations": [
-                {"date": t["date"], "libelle": t.get("label"), "montant": _r(t["amount"]), "categorie": t.get("category")}
+                {"id": t.get("id"), "date": t["date"], "libelle": t.get("label"), "montant": _r(t["amount"]), "categorie": t.get("category")}
                 for t in found[:limite]
             ],
         }
@@ -984,6 +984,177 @@ def confirmer_import_csv(code_confirmation: str) -> dict[str, Any]:
         return {"erreur": str(e)}
     del _pending_csv[code_confirmation.strip()]
     return {**res, "message": "Importé. L'appli le récupère à sa prochaine synchro (ouvrez-la ou attendez ~1 min)."}
+
+
+# --------------------------------------------------------------------------- catégories des opérations (budget)
+# Même effet que le menu « Catégorie » de l'appli : l'opération est marquée « choisie à la main » (manual) et, si on le
+# demande, une règle personnelle est retenue pour les prochains imports. Aucune suppression, aucun montant touché.
+
+MAX_RECAT = 500
+CAT_KINDS = ("depense", "revenu", "aide", "neutre")
+_pending_cat: dict[str, dict[str, Any]] = {}
+
+
+def _plain(s: str) -> str:
+    return bank_csv.norm_label(s).replace(" ", "")
+
+
+@mcp.tool()
+def lister_categories() -> dict[str, Any]:
+    """Liste les catégories du budget (nom, type, nombre d'opérations) et les règles personnelles de catégorisation."""
+    try:
+        _need_cloud()
+        b = vault.fetch().get("budget") or {}
+        count: dict[str, int] = {}
+        for t in b.get("transactions") or []:
+            c = t.get("category") or bank_csv.UNCATEGORIZED
+            count[c] = count.get(c, 0) + 1
+        cats = [{"nom": c["name"], "type": c.get("kind", "depense"), "operations": count.get(c["name"], 0)} for c in b.get("categories") or []]
+        return {"categories": cats, bank_csv.UNCATEGORIZED: count.get(bank_csv.UNCATEGORIZED, 0),
+                "regles_personnelles": (b.get("rules") or [])[:60], "nb_regles_personnelles": len(b.get("rules") or [])}
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def proposer_recategorisation(nouvelle_categorie: str, ids: list[str] | None = None, texte: str | None = None,
+                              date_debut: str | None = None, date_fin: str | None = None,
+                              categorie_actuelle: str | None = None, sens: str | None = None,
+                              creer_regle: bool = False, type_nouvelle_categorie: str | None = None) -> dict[str, Any]:
+    """PRÉPARE le changement de catégorie d'opérations du budget (rien n'est écrit). Sélection : soit `ids` (renvoyés par
+    rechercher_operations), soit des filtres : `texte` (morceau du libellé), `date_debut` / `date_fin` (AAAA-MM-JJ),
+    `categorie_actuelle`, `sens` (« entree » ou « sortie ») ; au moins un critère est obligatoire.
+    `nouvelle_categorie` : une catégorie existante (voir lister_categories), « À catégoriser », ou une nouvelle (dans ce cas
+    donnez `type_nouvelle_categorie` : depense, revenu, aide ou neutre). `creer_regle=True` retient aussi `texte` comme
+    règle personnelle pour les prochains imports. Renvoie l'aperçu (opérations, effet sur chaque mois) et un code à valider
+    avec confirmer_recategorisation."""
+    try:
+        _need_cloud()
+        b = copy.deepcopy(vault.fetch().get("budget") or {})
+        txs = b.get("transactions") or []
+        cats = {c["name"]: c.get("kind", "depense") for c in b.get("categories") or [] if "name" in c}
+        target = (nouvelle_categorie or "").strip()
+        if not target:
+            raise DataError("Indiquez la nouvelle catégorie.")
+        new_kind = None
+        if target != bank_csv.UNCATEGORIZED and target not in cats:
+            near = [c for c in cats if _plain(c) == _plain(target)]
+            if near:
+                raise DataError(f"« {target} » n'existe pas, mais « {near[0]} » oui : utilisez ce nom exact.")
+            if type_nouvelle_categorie not in CAT_KINDS:
+                raise DataError(f"« {target} » est une nouvelle catégorie : précisez type_nouvelle_categorie "
+                                f"({', '.join(CAT_KINDS)}). Catégories existantes : {', '.join(cats)}.")
+            if len(target) > 60:
+                raise DataError("Nom de catégorie trop long (60 caractères maximum).")
+            new_kind = type_nouvelle_categorie
+        for name, v in (("date_debut", date_debut), ("date_fin", date_fin)):
+            if v and not ISO.fullmatch(v):
+                raise DataError(f"{name} invalide « {v} » : utilisez AAAA-MM-JJ.")
+        if sens not in (None, "entree", "sortie"):
+            raise DataError("sens : « entree » ou « sortie ».")
+        if texte and not bank_csv.norm_label(texte):
+            raise DataError("`texte` ne contient aucun caractère utile : précisez un morceau de libellé.")
+        if ids and (texte or date_debut or date_fin or categorie_actuelle or sens):
+            raise DataError("Utilisez soit `ids`, soit des filtres, pas les deux.")
+        if creer_regle and target == bank_csv.UNCATEGORIZED:
+            raise DataError("Une règle vers « À catégoriser » n'a pas de sens : retirez creer_regle.")
+        if creer_regle and len(bank_csv.norm_label(texte)) < 3:
+            raise DataError("Pour créer une règle, donnez `texte` (au moins 3 caractères utiles).")
+        if ids:
+            by_id = {t.get("id"): t for t in txs}
+            missing = [i for i in ids if i not in by_id]
+            if missing:
+                raise DataError(f"Identifiants inconnus : {missing[:5]}.")
+            picked = [by_id[i] for i in dict.fromkeys(ids)]
+        else:
+            if not (texte or date_debut or date_fin or categorie_actuelle or sens):
+                raise DataError("Précisez au moins un critère (ids, texte, dates, categorie_actuelle ou sens) : "
+                                "pas de changement sur tout le budget d'un coup.")
+            needle = bank_csv.norm_label(texte) if texte else ""
+            picked = [t for t in txs
+                      if (not needle or needle in bank_csv.norm_label(t.get("label")))
+                      and (not date_debut or t["date"] >= date_debut) and (not date_fin or t["date"] <= date_fin)
+                      and (not categorie_actuelle or (t.get("category") or bank_csv.UNCATEGORIZED) == categorie_actuelle)
+                      and (sens is None or (float(t["amount"]) > 0) == (sens == "entree"))]
+        already = [t for t in picked if (t.get("category") or bank_csv.UNCATEGORIZED) == target]
+        todo = [t for t in picked if (t.get("category") or bank_csv.UNCATEGORIZED) != target]
+        if not todo:
+            raise DataError(f"Rien à changer : {len(picked)} opération(s) trouvée(s), déjà en « {target} »." if picked
+                            else "Aucune opération ne correspond à ces critères.")
+        if len(todo) > MAX_RECAT:
+            raise DataError(f"{len(todo)} opérations : affinez les critères (maximum {MAX_RECAT} à la fois).")
+        rule = None
+        if creer_regle:
+            match = bank_csv.norm_label(texte)
+            signs = {float(t["amount"]) > 0 for t in todo}
+            rule = {"match": match, "category": target, **({"sign": "in" if True in signs else "out"} if len(signs) == 1 else {})}
+        before = {m: _summary(b, m) for m in sorted({t["date"][:7] for t in todo})[-6:]}
+        old = {t["id"]: t.get("category") for t in todo}  # valeur brute, comparée telle quelle à l'écriture
+        if new_kind:
+            b.setdefault("categories", []).append({"name": target, "kind": new_kind})
+        for t in todo:
+            t["category"] = target
+        after = {m: _summary(b, m) for m in before}
+        code = secrets.token_hex(3)
+        for c in [c for c, p in _pending_cat.items() if time.time() - p["ts"] > PENDING_TTL]:
+            del _pending_cat[c]
+        _pending_cat[code] = {"old": old, "cat": target, "new_kind": new_kind, "rule": rule, "ts": time.time()}
+        return {
+            "nouvelle_categorie": target, "nouvelle_categorie_creee": new_kind,
+            "operations_a_changer": len(todo), "deja_dans_cette_categorie": len(already),
+            "exemples": [{"id": t["id"], "date": t["date"], "libelle": str(t.get("label"))[:60], "montant": _r(t["amount"]),
+                          "avant": old[t["id"]]} for t in sorted(todo, key=lambda x: x["date"], reverse=True)[:25]],
+            "regle_retenue": rule,
+            "effet_par_mois": {m: {"avant": before[m], "apres": after[m]} for m in before},
+            "code_confirmation": code,
+            "important": "RIEN n'est encore écrit. Montrez ce récapitulatif à l'utilisateur et appelez "
+                         "confirmer_recategorisation avec le code UNIQUEMENT après son accord explicite.",
+        }
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def confirmer_recategorisation(code_confirmation: str) -> dict[str, Any]:
+    """ÉCRIT le changement de catégorie préparé par proposer_recategorisation, après l'accord explicite de l'utilisateur.
+    Refusé si une des opérations a changé de catégorie entre-temps. Sauvegarde chiffrée avant écriture ; code valable 15 min."""
+    p = _pending_cat.get((code_confirmation or "").strip())
+    if not p or time.time() - p["ts"] > PENDING_TTL:
+        return {"erreur": "Code inconnu ou expiré : refaites la proposition."}
+
+    def modify(data: dict[str, Any]) -> dict[str, Any]:
+        b = data.get("budget")
+        if b is None:
+            raise vault.VaultError("Aucune donnée budget dans le coffre.")
+        by_id = {t.get("id"): t for t in b.get("transactions") or []}
+        for i, was in p["old"].items():
+            if i not in by_id or by_id[i].get("category") != was:
+                raise vault.VaultError("Une opération a été modifiée entre-temps : rien n'a été écrit, refaites la proposition.")
+        known = any(c.get("name") == p["cat"] for c in b.get("categories") or [])
+        if not known and not p["new_kind"] and p["cat"] != bank_csv.UNCATEGORIZED:
+            raise vault.VaultError(f"La catégorie « {p['cat']} » n'existe plus : rien n'a été écrit, refaites la proposition.")
+        if p["new_kind"] and not known:
+            b.setdefault("categories", []).append({"name": p["cat"], "kind": p["new_kind"]})
+        for i in p["old"]:
+            by_id[i]["category"] = p["cat"]
+            by_id[i]["manual"] = True
+        if p["rule"]:
+            rules = b.setdefault("rules", [])
+            same = next((r for r in rules if bank_csv.norm_label(r.get("match")) == p["rule"]["match"]
+                         and (r.get("sign") or "") == (p["rule"].get("sign") or "")), None)
+            if same:
+                same["category"] = p["cat"]
+            else:
+                rules.insert(0, dict(p["rule"]))
+        return {"operations_changees": len(p["old"]), "categorie": p["cat"], "regle": p["rule"]}
+
+    try:
+        _need_cloud()
+        res = vault.update(modify)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+    del _pending_cat[code_confirmation.strip()]
+    return {**res, "message": "Modifié. L'appli le récupère à sa prochaine synchro (ouvrez-la ou attendez ~1 min)."}
 
 
 def main() -> None:

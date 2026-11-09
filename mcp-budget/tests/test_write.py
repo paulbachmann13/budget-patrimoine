@@ -179,4 +179,46 @@ assert len(node("row", state["row"])["budget"]["transactions"]) == nb + 1
 link = Path(tmp) / "lien.csv"; link.symlink_to(csv_path)
 fresh(); assert "symboliques" in server.proposer_import_csv(chemin_fichier=str(link))["erreur"]
 print("OK  import CSV : aperçu, écriture, relue par sync.js, doublons, colonnes forcées, garde-fous")
+
+# 12. catégories des opérations : aperçu, écriture, règle, catégorie nouvelle, garde-fous
+fresh(); lc = server.lister_categories(); assert lc["categories"] and "regles_personnelles" in lc, lc
+fresh(); r1 = server.rechercher_operations(texte="mystere"); oid = r1["operations"][0]["id"]; assert oid, r1
+fresh(); rev0 = state["row"]["rev"]
+m = server.proposer_recategorisation("Logement & factures", ids=[oid])
+assert m["operations_a_changer"] == 1 and m["exemples"][0]["avant"] == "À catégoriser" and state["row"]["rev"] == rev0, m
+assert "2026-03" in m["effet_par_mois"] and m["effet_par_mois"]["2026-03"]["apres"]["operations_a_categoriser"] == m["effet_par_mois"]["2026-03"]["avant"]["operations_a_categoriser"] - 1, m
+r = server.confirmer_recategorisation(m["code_confirmation"]); assert r.get("operations_changees") == 1 and r.get("version") == rev0 + 1, r
+t = [x for x in node("row", state["row"])["budget"]["transactions"] if x["id"] == oid][0]
+assert t["category"] == "Logement & factures" and t["manual"] is True and t["amount"] == -12
+assert "erreur" in server.confirmer_recategorisation(m["code_confirmation"]), "un code ne sert qu'une fois"
+# nouvelle catégorie + règle, par filtre de texte
+fresh(); assert "type_nouvelle_categorie" in server.proposer_recategorisation("Sorties", texte="carrefour")["erreur"]
+fresh(); assert "alimentation" in server.proposer_recategorisation("alimentation & restauration", texte="carrefour")["erreur"].lower()
+fresh(); m2 = server.proposer_recategorisation("Courses bio", texte="carrefour", creer_regle=True, type_nouvelle_categorie="depense")
+assert m2["operations_a_changer"] >= 2 and m2["nouvelle_categorie_creee"] == "depense" and m2["regle_retenue"]["match"] == "carrefour" and m2["regle_retenue"]["sign"] == "out", m2
+server.confirmer_recategorisation(m2["code_confirmation"])
+bud = node("row", state["row"])["budget"]
+assert {"name": "Courses bio", "kind": "depense"} in bud["categories"] and bud["rules"][0] == {"match": "carrefour", "category": "Courses bio", "sign": "out"}
+assert all(x["category"] == "Courses bio" for x in bud["transactions"] if "carrefour" in x["label"].lower() and x["date"] < "2026-03-12")
+fresh(); assert "Rien à changer" in server.proposer_recategorisation("Courses bio", texte="carrefour")["erreur"]
+fresh(); assert "critère" in server.proposer_recategorisation("Courses bio")["erreur"], "jamais tout le budget d'un coup"
+fresh(); assert "erreur" in server.proposer_recategorisation("Courses bio", ids=["inconnu"])
+fresh(); assert "3 caractères" in server.proposer_recategorisation("Courses bio", texte="x", creer_regle=True)["erreur"]
+# l'opération a changé entre l'aperçu et l'écriture : refusé
+fresh(); a = server.proposer_recategorisation("Épargne / placements", texte="loyer")
+fresh(); b2 = server.proposer_recategorisation("Aide famille", texte="loyer"); server.confirmer_recategorisation(b2["code_confirmation"])
+fresh(); assert "modifiée entre-temps" in server.confirmer_recategorisation(a["code_confirmation"])["erreur"]
+# garde-fous issus de la relecture : texte vide, ids + filtres, règle vers « À catégoriser », remise en « À catégoriser »
+fresh(); assert "caractère utile" in server.proposer_recategorisation("Courses bio", texte="§§ ")["erreur"]
+fresh(); assert "pas les deux" in server.proposer_recategorisation("Courses bio", ids=[oid], texte="loyer")["erreur"]
+fresh(); assert "n'a pas de sens" in server.proposer_recategorisation("À catégoriser", texte="carrefour", creer_regle=True)["erreur"]
+fresh(); u = server.proposer_recategorisation("À catégoriser", ids=[oid]); server.confirmer_recategorisation(u["code_confirmation"])
+t = [x for x in node("row", state["row"])["budget"]["transactions"] if x["id"] == oid][0]
+assert t["category"] == "À catégoriser" and t["manual"] is True, "comme setCategory de l'appli : choisie à la main"
+# règle existante (même texte et même signe) : mise à jour, pas de doublon
+fresh(); m5 = server.proposer_recategorisation("Alimentation & restauration", texte="carrefour", creer_regle=True)
+server.confirmer_recategorisation(m5["code_confirmation"])
+rules = node("row", state["row"])["budget"]["rules"]
+assert [r["category"] for r in rules if r["match"] == "carrefour"] == ["Alimentation & restauration"], rules
+print("OK  catégories : aperçu, écriture, règle, nouvelle catégorie, garde-fous, conflit")
 print("\nTous les tests passent.")
