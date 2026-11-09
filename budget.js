@@ -1350,10 +1350,33 @@ const Budget = {
       const add = document.createElement('option'); add.value = '__new'; add.textContent = '+ Nouvelle catégorie…'; sel.appendChild(add);
       sel.value = t.category;
       sel.addEventListener('change', () => Budget.setCategory(t.id, sel.value));
-      bottom.append(date, sel);
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'icon-btn small tx-del'; del.textContent = '×';
+      del.setAttribute('aria-label', `Supprimer l'opération du ${Fmt.date(t.date)} : ${BudgetCore.displayLabel(t.label)}`);
+      del.addEventListener('click', () => Budget.deleteTransaction(t.id));
+      bottom.append(date, sel, del);
       li.append(top, bottom);
       box.appendChild(li);
     });
+  },
+
+  /**
+   * Supprime une opération (doublon, erreur). La suppression est définitive et suit la
+   * synchronisation : elle ne revient pas depuis un autre appareil. Un nouvel import du même
+   * fichier bancaire la recréerait, puisque la banque la contient toujours.
+   */
+  deleteTransaction(id) {
+    const s = Budget.state;
+    const t = s.transactions.find((x) => x.id === id);
+    if (!t) return;
+    const msg = `Supprimer cette opération ?\n\n${Fmt.date(t.date)} · ${BudgetCore.displayLabel(t.label)} · ${Fmt.signedEur(t.amount)}\n\n`
+      + 'Elle ne reviendra pas avec la synchronisation. Si vous réimportez le même fichier bancaire, elle sera recréée.';
+    if (!confirm(msg)) return;
+    if (typeof Sync !== 'undefined') Sync.noteDeleted('transactions', t.id);
+    s.transactions = s.transactions.filter((x) => x.id !== id);
+    Budget.persist();
+    Budget.renderMonth();
+    Budget.renderCategoriesCard();
+    Budget.toast('Opération supprimée');
   },
 
   /** Change la catégorie d'une transaction ; propose d'en faire une règle pour les libellés similaires. */

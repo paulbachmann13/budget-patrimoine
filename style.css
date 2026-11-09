@@ -613,3 +613,6 @@ html.privacy main, html.privacy .topbar, html.privacy .tabbar, html.privacy dial
 .cmp-pick select { flex: 1 1 140px; min-width: 0; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--muted); border-radius: 8px; padding: 6px 8px; }
 #cmp-periods { padding: 0 8px; margin: 4px 0 8px; }
 #cmp-periods .chip { min-height: 34px; padding: 0 12px; }
+
+/* Suppression d'une opération */
+.tx-bottom .tx-del { flex: none; min-height: 36px; min-width: 36px; }
