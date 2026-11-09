@@ -155,14 +155,14 @@ test('fusion : suppression conservée même si les appareils n\'ont pas la même
 
 test('suppressions volontaires : retirées de la fusion, listes concernées seulement, éléments voisins intacts', () => {
   const data = {
-    budget: { transactions: [{ id: 'a' }], assets: [{ id: 'car' }, { id: 'house' }], accounts: [{ id: 'car' }] },
+    budget: { rules: [{ id: 'a' }], assets: [{ id: 'car' }, { id: 'house' }], accounts: [{ id: 'car' }] },
     pea: { purchases: [{ id: 'p1' }, { id: 'p2' }], deposits: [], sales: [], moves: [] },
   };
-  const { data: out, removed } = M.dropDeleted(data, { assets: { car: 1 }, purchases: { p2: 1 }, transactions: { a: 1 } });
+  const { data: out, removed } = M.dropDeleted(data, { assets: { car: 1 }, purchases: { p2: 1 }, rules: { a: 1 } });
   assert.deepEqual(out.budget.assets, [{ id: 'house' }]);
   assert.deepEqual(out.budget.accounts, [{ id: 'car' }], 'même id dans une autre liste : conservé');
   assert.deepEqual(out.pea.purchases, [{ id: 'p1' }]);
-  assert.deepEqual(out.budget.transactions, [{ id: 'a' }], 'liste non supprimable : intacte');
+  assert.deepEqual(out.budget.rules, [{ id: 'a' }], 'liste non supprimable : intacte');
   assert.equal(removed, 2);
   assert.equal(data.budget.assets.length, 2, 'les données d\'origine ne sont pas modifiées');
   assert.equal(M.dropDeleted(data, null).removed, 0);
@@ -188,4 +188,15 @@ test('journal : comptage des éléments suivis', () => {
   assert.deepEqual(M.counts({ budget: { assets: [1, 2], accounts: [1], transactions: [1, 2, 3] }, pea: { purchases: [1], sales: [] } }),
     { biens: 2, comptes: 1, transactions: 3, achats: 1, ventes: 0 });
   assert.deepEqual(M.counts(null), { biens: 0, comptes: 0, transactions: 0, achats: 0, ventes: 0 });
+});
+
+test('suppression d\'une opération bancaire : retirée, voisines intactes, ne revient pas de la synchro', () => {
+  const tx = (id) => ({ id, date: '2026-10-01', label: 'x', amount: -1 });
+  const local = { budget: { transactions: [tx('keep')] }, pea: {} };
+  const remote = { budget: { transactions: [tx('keep'), tx('dup')] }, pea: {} }; // le coffre contient encore le doublon
+  const merged = M.merge(local, local, remote);
+  assert.deepEqual(merged.budget.transactions.map((t) => t.id).sort(), ['dup', 'keep']); // la fusion seule le ramène
+  const { data, removed } = M.dropDeleted(merged, { transactions: { dup: Date.now() } });
+  assert.deepEqual(data.budget.transactions.map((t) => t.id), ['keep']);
+  assert.equal(removed, 1);
 });

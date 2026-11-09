@@ -159,7 +159,7 @@ const SyncCore = (() => {
   }
 
   /** Listes dont l'utilisateur peut supprimer des éléments, par partie ({budget, pea}). */
-  const DELETABLE = { budget: ['accounts', 'assets'], pea: ['purchases', 'deposits', 'sales', 'moves'] };
+  const DELETABLE = { budget: ['accounts', 'assets', 'transactions'], pea: ['purchases', 'deposits', 'sales', 'moves'] };
 
   /**
    * Retire des données les éléments supprimés par l'utilisateur sur CET appareil.
@@ -475,7 +475,7 @@ const Sync = {
     return d;
   },
 
-  /** À appeler quand l'utilisateur supprime un élément (compte, bien, achat, vente, versement, mouvement). */
+  /** À appeler quand l'utilisateur supprime un élément (opération, compte, bien, achat, vente, versement, mouvement). */
   noteDeleted(list, id) {
     const d = Sync.readDeleted();
     (d[list] = d[list] || {})[String(id)] = Date.now();
