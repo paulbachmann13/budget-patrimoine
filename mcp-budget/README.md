@@ -34,4 +34,12 @@ Patrimoine → Importer une sauvegarde chiffrée) ; écriture avec contrôle de 
 a écrit entre-temps. L'appli récupère l'ajout à sa prochaine synchro (~1 min). Tests : `tests/test_write.py`.
 
 ## Outils
-`etat_donnees`, `resume_budget`, `depenses_par_categorie`, `rechercher_operations`, `plafonds_budget`, `valeur_pea`, `patrimoine_total` (lecture) ; `proposer_achat`, `proposer_vente`, `proposer_versement`, `proposer_mouvement` (régularisation, frais, retrait, dividende), `confirmer_ajout` (écriture PEA) ; `lister_operations_pea`, `proposer_modification`, `confirmer_modification` (correction d'une ligne existante du PEA : date, quantité, prix, frais, montant, type ; mêmes garde-fous, jamais de suppression, refusée si elle crée une vente excessive ou si la ligne a changé entre-temps).
+`etat_donnees`, `resume_budget`, `depenses_par_categorie`, `rechercher_operations`, `plafonds_budget`, `valeur_pea`, `patrimoine_total` (lecture) ; `proposer_achat`, `proposer_vente`, `proposer_versement`, `proposer_mouvement` (régularisation, frais, retrait, dividende), `confirmer_ajout` (écriture PEA) ; `lister_operations_pea`, `proposer_modification`, `proposer_import_csv`, `confirmer_import_csv` (import d'un export CSV de la banque dans le budget, comme le bouton de l'appli : colonnes détectées, doublons écartés, catégories d'après vos règles ; aperçu puis confirmation) ; `confirmer_modification` (correction d'une ligne existante du PEA : date, quantité, prix, frais, montant, type ; mêmes garde-fous, jamais de suppression, refusée si elle crée une vente excessive ou si la ligne a changé entre-temps).
+
+
+## Import d'un CSV bancaire
+
+`proposer_import_csv(chemin_fichier=...)` (ou `contenu_csv=` pour du texte collé) lit l'export de la banque avec **la même logique que le bouton « Importer un CSV » de l'appli** (`bank_csv.py`, port de `budget.js`) : séparateur et colonnes détectés, dates et montants français/anglais, UTF-8 ou Windows-1252, doublons écartés (date + montant + libellé), catégories d'après vos règles puis les règles par défaut. Si la détection échoue, on force les colonnes (`colonne_date`, `colonne_libelle`, `colonne_montant` ou `colonne_debit` + `colonne_credit`, numérotées depuis 1). Rien n'est écrit avant `confirmer_import_csv` ; sauvegarde chiffrée avant écriture, doublons revérifiés au moment d'écrire. Les lignes à « catégoriser » se terminent dans l'appli.
+
+`default_rules.json` est une copie des règles par défaut de `budget.js`. Si on les modifie dans l'appli, le test `tests/test_csv.py` échoue : regénérer avec
+`node -e "require('fs').writeFileSync('mcp-budget/default_rules.json', JSON.stringify(require('./budget.js').BudgetCore.DEFAULT_RULES, null, 1))"` (depuis la racine du dépôt).

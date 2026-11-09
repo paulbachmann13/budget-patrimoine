@@ -140,4 +140,43 @@ fresh(); m3 = server.proposer_modification("p2", frais=9)
 fresh(); m4 = server.proposer_modification("p2", frais=7); server.confirmer_modification(m4["code_confirmation"])
 fresh(); assert "modifiée entre-temps" in server.confirmer_modification(m3["code_confirmation"])["erreur"]
 print("OK  modification : aperçu, écriture, relue par sync.js, garde-fous (id, champ, vente, date, ligne changée)")
+
+# 11. import d'un CSV bancaire : aperçu sans écriture, écriture, relecture par sync.js, doublons, garde-fous
+csv_path = Path(tmp) / "export-banque.csv"
+csv_path.write_text("Date;Libellé;Débit euros;Crédit euros\n12/03/2026;PAIEMENT PAR CARTE X1234 CARREFOUR MARKET 12/03;42,10;\n"
+                    "13/03/2026;WINAMAX PARIS;10,00;\n14/03/2026;VIREMENT EN VOTRE FAVEUR M DUPONT;;100,00\n15/03/2026;TRUC INCONNU;5,00;\n"
+                    "03/03/2026;CARREFOUR MARKET;85,50;\n", encoding="utf-8")
+fresh(); n0 = len(ts.BUDGET["transactions"]); rev0 = state["row"]["rev"]
+c = server.proposer_import_csv(chemin_fichier=str(csv_path))
+assert c["lignes_lues"] == 5 and c["nouvelles"] == 4 and c["deja_presentes"] == 1, c
+assert c["a_categoriser"]["nombre"] == 1 and "Jeux d'argent" in c["par_categorie"] and c["periode"] == ["2026-03-12", "2026-03-15"], c
+assert state["row"]["rev"] == rev0, "l'aperçu ne doit rien écrire"
+r = server.confirmer_import_csv(c["code_confirmation"]); assert r.get("importees") == 4 and r.get("version") == rev0 + 1, r
+bud = node("row", state["row"])["budget"]
+assert len(bud["transactions"]) == n0 + 4 and bud["lastImport"] and len({t["id"] for t in bud["transactions"]}) == n0 + 4
+new = [t for t in bud["transactions"] if t["date"] >= "2026-03-12"]
+assert {t["label"]: t["category"] for t in new}["WINAMAX PARIS"] == "Jeux d'argent" and all(t["manual"] is False for t in new)
+assert "erreur" in server.confirmer_import_csv(c["code_confirmation"]), "un code ne sert qu'une fois"
+fresh(); assert "déjà dans l'appli" in server.proposer_import_csv(chemin_fichier=str(csv_path))["erreur"], "réimport = rien à faire"
+bad = Path(tmp) / "x.pdf"; bad.write_text("x")
+fresh(); assert "erreur" in server.proposer_import_csv(chemin_fichier=str(bad)) and "erreur" in server.proposer_import_csv(chemin_fichier="/inexistant.csv")
+fresh(); assert "erreur" in server.proposer_import_csv()
+fresh(); assert "inexistante" in server.proposer_import_csv(contenu_csv="a;b\n1;2\n", colonne_date=9)["erreur"]
+# colonnes forcées + texte collé
+fresh(); c2 = server.proposer_import_csv(contenu_csv="x;y;z\n20/03/2026;-7,5;BOULANGERIE PAUL\n", colonne_date=1, colonne_montant=2, colonne_libelle=3)
+assert c2["nouvelles"] == 1 and c2["par_categorie"].get("Alimentation & restauration"), c2
+# doublon survenu entre l'aperçu et l'écriture (autre import) : refusé
+server.confirmer_import_csv(c2["code_confirmation"])
+fresh(); c3 = server.proposer_import_csv(contenu_csv="Date;Libellé;Montant\n21/03/2026;CAFE DU PORT;-3\n")
+fresh(); c4 = server.proposer_import_csv(contenu_csv="Date;Libellé;Montant\n21/03/2026;CAFE DU PORT;-3\n"); server.confirmer_import_csv(c4["code_confirmation"])
+fresh(); assert "déjà présent" in server.confirmer_import_csv(c3["code_confirmation"])["erreur"]
+# multiplicité : 2 lignes identiques dans le CSV dont 1 déjà dans l'appli → 1 seule nouvelle, bien écrite
+fresh(); c5 = server.proposer_import_csv(contenu_csv="Date;Libellé;Montant\n03/03/2026;CARREFOUR MARKET;-85,50\n03/03/2026;CARREFOUR MARKET;-85,50\n")
+assert c5["nouvelles"] == 1 and c5["deja_presentes"] == 1, c5
+nb = len(node("row", state["row"])["budget"]["transactions"])
+assert server.confirmer_import_csv(c5["code_confirmation"]).get("importees") == 1
+assert len(node("row", state["row"])["budget"]["transactions"]) == nb + 1
+link = Path(tmp) / "lien.csv"; link.symlink_to(csv_path)
+fresh(); assert "symboliques" in server.proposer_import_csv(chemin_fichier=str(link))["erreur"]
+print("OK  import CSV : aperçu, écriture, relue par sync.js, doublons, colonnes forcées, garde-fous")
 print("\nTous les tests passent.")

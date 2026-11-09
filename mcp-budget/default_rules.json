@@ -1,0 +1,714 @@
+[
+ {
+  "match": "carrefour",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "leclerc",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "auchan",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "lidl",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "intermarche",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "monoprix",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "franprix",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "picard",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "super u",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "u express",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "casino shop",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "biocoop",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "aldi ",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "netto ",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "boulangerie",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "boucherie",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "mcdo",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "mc donald",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "burger king",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "kfc",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "quick ",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "subway",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "uber eats",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "deliveroo",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "just eat",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "restaurant",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "sushi",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "pizza",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "kebab",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "tacos",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "crous",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "eurest",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "sodexo",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "izly",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "swile",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "edeka",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "rewe ",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "scheck-in",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "kaufland",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "penny ",
+  "category": "Alimentation & restauration"
+ },
+ {
+  "match": "bar ",
+  "category": "Bar / Café"
+ },
+ {
+  "match": "cafe",
+  "category": "Bar / Café"
+ },
+ {
+  "match": "brasserie",
+  "category": "Bar / Café"
+ },
+ {
+  "match": "pub ",
+  "category": "Bar / Café"
+ },
+ {
+  "match": "starbucks",
+  "category": "Bar / Café"
+ },
+ {
+  "match": "coffee",
+  "category": "Bar / Café"
+ },
+ {
+  "match": "total energies",
+  "category": "Carburant"
+ },
+ {
+  "match": "totalenergies",
+  "category": "Carburant"
+ },
+ {
+  "match": "esso ",
+  "category": "Carburant"
+ },
+ {
+  "match": "shell ",
+  "category": "Carburant"
+ },
+ {
+  "match": "station service",
+  "category": "Carburant"
+ },
+ {
+  "match": "carburant",
+  "category": "Carburant"
+ },
+ {
+  "match": "avia ",
+  "category": "Carburant"
+ },
+ {
+  "match": "aral ",
+  "category": "Carburant"
+ },
+ {
+  "match": "sncf",
+  "category": "Transport"
+ },
+ {
+  "match": "ouigo",
+  "category": "Transport"
+ },
+ {
+  "match": "ratp",
+  "category": "Transport"
+ },
+ {
+  "match": "tcl ",
+  "category": "Transport"
+ },
+ {
+  "match": "rtm ",
+  "category": "Transport"
+ },
+ {
+  "match": "blablacar",
+  "category": "Transport"
+ },
+ {
+  "match": "uber",
+  "category": "Transport"
+ },
+ {
+  "match": "bolt ",
+  "category": "Transport"
+ },
+ {
+  "match": "flixbus",
+  "category": "Transport"
+ },
+ {
+  "match": "peage",
+  "category": "Transport"
+ },
+ {
+  "match": "vinci autoroutes",
+  "category": "Transport"
+ },
+ {
+  "match": "sanef",
+  "category": "Transport"
+ },
+ {
+  "match": "aprr",
+  "category": "Transport"
+ },
+ {
+  "match": "asf ",
+  "category": "Transport"
+ },
+ {
+  "match": "navigo",
+  "category": "Transport"
+ },
+ {
+  "match": "ter ",
+  "category": "Transport"
+ },
+ {
+  "match": "trainline",
+  "category": "Transport"
+ },
+ {
+  "match": "easypark",
+  "category": "Transport"
+ },
+ {
+  "match": "parking",
+  "category": "Transport"
+ },
+ {
+  "match": "parkhaus",
+  "category": "Transport"
+ },
+ {
+  "match": "contipark",
+  "category": "Transport"
+ },
+ {
+  "match": "parken ",
+  "category": "Transport"
+ },
+ {
+  "match": "lavage",
+  "category": "Transport"
+ },
+ {
+  "match": "elephant bleu",
+  "category": "Transport"
+ },
+ {
+  "match": "norauto",
+  "category": "Transport"
+ },
+ {
+  "match": "netflix",
+  "category": "Abonnements"
+ },
+ {
+  "match": "spotify",
+  "category": "Abonnements"
+ },
+ {
+  "match": "disney",
+  "category": "Abonnements"
+ },
+ {
+  "match": "canal+",
+  "category": "Abonnements"
+ },
+ {
+  "match": "youtube",
+  "category": "Abonnements"
+ },
+ {
+  "match": "apple.com/bill",
+  "category": "Abonnements"
+ },
+ {
+  "match": "icloud",
+  "category": "Abonnements"
+ },
+ {
+  "match": "google one",
+  "category": "Abonnements"
+ },
+ {
+  "match": "amazon prime",
+  "category": "Abonnements"
+ },
+ {
+  "match": "deezer",
+  "category": "Abonnements"
+ },
+ {
+  "match": "openai",
+  "category": "Abonnements"
+ },
+ {
+  "match": "anthropic",
+  "category": "Abonnements"
+ },
+ {
+  "match": "github",
+  "category": "Abonnements"
+ },
+ {
+  "match": "edf ",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "engie",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "loyer",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "free mobile",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "orange ",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "sfr ",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "bouygues",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "assurance",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "macif",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "maif",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "axa ",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "eau ",
+  "category": "Logement & factures"
+ },
+ {
+  "match": "pharmacie",
+  "category": "Santé"
+ },
+ {
+  "match": "docteur",
+  "category": "Santé"
+ },
+ {
+  "match": "medecin",
+  "category": "Santé"
+ },
+ {
+  "match": "dentiste",
+  "category": "Santé"
+ },
+ {
+  "match": "mutuelle",
+  "category": "Santé"
+ },
+ {
+  "match": "optique",
+  "category": "Santé"
+ },
+ {
+  "match": "decathlon",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "basic fit",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "basic-fit",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "fitness",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "padel",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "cinema",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "steam ",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "playstation",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "playtomic",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "helloasso",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "hello asso",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "shotgun",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "bowling",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "sony interactive",
+  "category": "Sport / Loisirs"
+ },
+ {
+  "match": "amazon",
+  "category": "Shopping"
+ },
+ {
+  "match": "zalando",
+  "category": "Shopping"
+ },
+ {
+  "match": "fnac",
+  "category": "Shopping"
+ },
+ {
+  "match": "ikea",
+  "category": "Shopping"
+ },
+ {
+  "match": "cdiscount",
+  "category": "Shopping"
+ },
+ {
+  "match": "vinted",
+  "category": "Shopping"
+ },
+ {
+  "match": "zara ",
+  "category": "Shopping"
+ },
+ {
+  "match": "h&m",
+  "category": "Shopping"
+ },
+ {
+  "match": "leroy merlin",
+  "category": "Shopping"
+ },
+ {
+  "match": "darty",
+  "category": "Shopping"
+ },
+ {
+  "match": "boulanger ",
+  "category": "Shopping"
+ },
+ {
+  "match": "airbnb",
+  "category": "Voyages"
+ },
+ {
+  "match": "booking",
+  "category": "Voyages"
+ },
+ {
+  "match": "ryanair",
+  "category": "Voyages"
+ },
+ {
+  "match": "easyjet",
+  "category": "Voyages"
+ },
+ {
+  "match": "air france",
+  "category": "Voyages"
+ },
+ {
+  "match": "transavia",
+  "category": "Voyages"
+ },
+ {
+  "match": "hotel",
+  "category": "Voyages"
+ },
+ {
+  "match": "lufthansa",
+  "category": "Voyages"
+ },
+ {
+  "match": "edreams",
+  "category": "Voyages"
+ },
+ {
+  "match": "opodo",
+  "category": "Voyages"
+ },
+ {
+  "match": "expedia",
+  "category": "Voyages"
+ },
+ {
+  "match": "salaire",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "salary",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "lohn",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "gehalt",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "paie ",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "gratification",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "indemnite stage",
+  "category": "Salaire",
+  "sign": "in"
+ },
+ {
+  "match": "bforbank",
+  "category": "Épargne / placements"
+ },
+ {
+  "match": "livret",
+  "category": "Épargne / placements"
+ },
+ {
+  "match": "pea ",
+  "category": "Épargne / placements"
+ },
+ {
+  "match": "trade republic",
+  "category": "Épargne / placements"
+ },
+ {
+  "match": "boursorama bourse",
+  "category": "Épargne / placements"
+ },
+ {
+  "match": "retrait au distributeur",
+  "category": "Espèces"
+ },
+ {
+  "match": "retrait dab",
+  "category": "Espèces"
+ },
+ {
+  "match": "retrait especes",
+  "category": "Espèces"
+ },
+ {
+  "match": "versement d'especes",
+  "category": "Virement interne"
+ },
+ {
+  "match": "cotisation offre",
+  "category": "Frais bancaires"
+ },
+ {
+  "match": "frais bancaires",
+  "category": "Frais bancaires"
+ },
+ {
+  "match": "frais de tenue",
+  "category": "Frais bancaires"
+ },
+ {
+  "match": "agios",
+  "category": "Frais bancaires"
+ },
+ {
+  "match": "commission ",
+  "category": "Frais bancaires"
+ },
+ {
+  "match": "winamax",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "betclic",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "unibet",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "pari mutuel",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "pmu ",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "parions sport",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "fdj ",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "francaise des jeux",
+  "category": "Jeux d'argent"
+ },
+ {
+  "match": "virement en votre faveur",
+  "category": "Virements reçus",
+  "sign": "in"
+ }
+]

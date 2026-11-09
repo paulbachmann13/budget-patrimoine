@@ -834,6 +834,158 @@ def confirmer_modification(code_confirmation: str) -> dict[str, Any]:
             "pea_apres": _pea_report(vault.fetch().get("pea") or {})["total_pea"]}
 
 
+# --------------------------------------------------------------------------- import d'un CSV bancaire (budget)
+# Même logique que le bouton « Importer un CSV » de l'appli (bank_csv.py est testé contre le vrai budget.js) :
+# colonnes détectées, doublons écartés, catégories d'après les règles de l'utilisateur puis les règles par défaut.
+
+import bank_csv
+
+MAX_CSV_BYTES = 5 * 1024 * 1024
+MAX_CSV_ROWS = 5000
+_pending_csv: dict[str, dict[str, Any]] = {}
+
+
+def _csv_text(chemin: str | None, contenu: str | None) -> tuple[str, str]:
+    if contenu and contenu.strip():
+        if len(contenu.encode("utf-8")) > MAX_CSV_BYTES:
+            raise DataError("Contenu CSV trop volumineux (5 Mo maximum).")
+        return contenu, "(texte collé)"
+    if not (chemin and chemin.strip()):
+        raise DataError("Indiquez chemin_fichier (fichier .csv) ou contenu_csv (texte du CSV).")
+    f = Path(chemin.strip()).expanduser()
+    if f.is_symlink():
+        raise DataError("Les liens symboliques ne sont pas acceptés : indiquez le fichier lui-même.")
+    if not f.is_file():
+        raise DataError(f"Fichier introuvable : {f}")
+    if f.suffix.lower() not in (".csv", ".txt", ".tsv"):
+        raise DataError("Seuls les fichiers .csv, .tsv ou .txt sont acceptés.")
+    if f.stat().st_size > MAX_CSV_BYTES:
+        raise DataError("Fichier trop volumineux (5 Mo maximum).")
+    with f.open("rb") as fh:
+        raw = fh.read(MAX_CSV_BYTES + 1)
+    if len(raw) > MAX_CSV_BYTES:
+        raise DataError("Fichier trop volumineux (5 Mo maximum).")
+    return bank_csv.decode(raw), f.name
+
+
+@mcp.tool()
+def proposer_import_csv(chemin_fichier: str | None = None, contenu_csv: str | None = None,
+                        colonne_date: int | None = None, colonne_libelle: int | None = None,
+                        colonne_montant: int | None = None, colonne_debit: int | None = None,
+                        colonne_credit: int | None = None) -> dict[str, Any]:
+    """PRÉPARE l'import d'un export CSV de la banque dans le budget (rien n'est écrit). Donnez `chemin_fichier`
+    (ex. ~/Downloads/export.csv) ou collez le texte dans `contenu_csv`. Les colonnes sont détectées comme dans l'appli ;
+    en cas d'erreur, forcez-les avec les numéros de colonne (1 = première). Les opérations déjà présentes sont écartées
+    (mêmes règles que l'appli), les nouvelles sont catégorisées avec les règles de l'utilisateur.
+    Renvoie un aperçu et un code à valider avec confirmer_import_csv."""
+    try:
+        _need_cloud()
+        text, name = _csv_text(chemin_fichier, contenu_csv)
+        rows, delim = bank_csv.parse_csv(text)
+        if len(rows) < 2:
+            raise DataError("Le fichier semble vide.")
+        det = bank_csv.detect_columns(rows)
+        cols, headers = dict(det["cols"]), det["headers"]
+        for key, val in (("date", colonne_date), ("label", colonne_libelle), ("amount", colonne_montant),
+                         ("debit", colonne_debit), ("credit", colonne_credit)):
+            if val is not None:
+                if not 1 <= int(val) <= len(headers):
+                    raise DataError(f"Colonne {val} inexistante (le fichier en a {len(headers)}).")
+                cols[key] = int(val) - 1
+        if colonne_montant is not None:
+            cols["debit"] = cols["credit"] = -1
+        if (colonne_debit is not None or colonne_credit is not None) and colonne_montant is None:
+            cols["amount"] = -1
+        if cols["date"] < 0 or (cols["amount"] < 0 and cols["debit"] < 0 and cols["credit"] < 0):
+            raise DataError("Colonnes date / montant introuvables : indiquez-les (colonne_date, colonne_montant ou "
+                            f"colonne_debit + colonne_credit). Colonnes du fichier : {headers}")
+        txs, skipped = bank_csv.extract_transactions(rows, det["header_row"], cols)
+        if not txs:
+            raise DataError(f"Aucune transaction lue : vérifiez les colonnes. Détectées : {cols} ; en-têtes : {headers}")
+        if len(txs) > MAX_CSV_ROWS:
+            raise DataError(f"{len(txs)} lignes : importez par morceaux de {MAX_CSV_ROWS} maximum.")
+        budget = vault.fetch().get("budget")
+        if budget is None:
+            raise DataError("Aucune donnée budget dans la synchro.")
+        fresh, dups = bank_csv.dedupe(budget.get("transactions") or [], txs)
+        if not fresh:
+            raise DataError(f"Rien à importer : les {len(txs)} opérations lues sont déjà dans l'appli.")
+        rules = budget.get("rules") or []
+        by_cat: dict[str, dict[str, float]] = {}
+        uncat: list[str] = []
+        for t in fresh:
+            t["category"] = bank_csv.categorize(t, rules)
+            c = by_cat.setdefault(t["category"], {"nb": 0, "somme": 0.0})
+            c["nb"] += 1
+            c["somme"] = round(c["somme"] + t["amount"], 2)
+            if t["category"] == bank_csv.UNCATEGORIZED:
+                uncat.append(f"{t['date']} {t['amount']:+.2f} {t['label'][:60]}")
+        code = secrets.token_hex(3)
+        for c in [c for c, p in _pending_csv.items() if time.time() - p["ts"] > PENDING_TTL]:
+            del _pending_csv[c]
+        _pending_csv[code] = {"txs": [{k: t[k] for k in ("date", "label", "amount")} for t in txs], "ts": time.time()}
+        return {
+            "fichier": name,
+            "colonnes_utilisees": {k: (headers[v] if v >= 0 else None) for k, v in cols.items()},
+            "lignes_lues": len(txs), "nouvelles": len(fresh), "deja_presentes": len(dups),
+            "lignes_illisibles": skipped[:20], "nb_lignes_illisibles": len(skipped),
+            "periode": [min(t["date"] for t in fresh), max(t["date"] for t in fresh)],
+            "entrees": round(sum(t["amount"] for t in fresh if t["amount"] > 0), 2),
+            "sorties": round(-sum(t["amount"] for t in fresh if t["amount"] < 0), 2),
+            "par_categorie": dict(sorted(by_cat.items(), key=lambda kv: -kv[1]["nb"])),
+            "a_categoriser": {"nombre": len(uncat), "exemples": uncat[:15]},
+            "extrait": [{"date": t["date"], "montant": t["amount"], "libelle": t["label"][:60], "categorie": t["category"]} for t in fresh[:8]],
+            "code_confirmation": code,
+            "important": "RIEN n'est encore écrit. Montrez ce récapitulatif à l'utilisateur et appelez confirmer_import_csv "
+                         "avec le code UNIQUEMENT après son accord explicite.",
+        }
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+
+
+@mcp.tool()
+def confirmer_import_csv(code_confirmation: str) -> dict[str, Any]:
+    """ÉCRIT dans la synchro l'import préparé par proposer_import_csv, après l'accord explicite de l'utilisateur.
+    Les doublons sont revérifiés au moment d'écrire. Sauvegarde chiffrée avant écriture ; code valable 15 minutes."""
+    p = _pending_csv.get((code_confirmation or "").strip())
+    if not p or time.time() - p["ts"] > PENDING_TTL:
+        return {"erreur": "Code inconnu ou expiré : refaites la proposition."}
+
+    def modify(data: dict[str, Any]) -> dict[str, Any]:
+        budget = data.get("budget")
+        if budget is None:
+            raise vault.VaultError("Aucune donnée budget dans le coffre.")
+        existing = budget.get("transactions") or []
+        budget["transactions"] = existing
+        fresh, dups = bank_csv.dedupe(existing, p["txs"])
+        if not fresh:
+            raise vault.VaultError("Tout est déjà présent (importé entre-temps) : rien n'a été écrit.")
+        ids = {t.get("id") for t in existing}
+        rules = budget.get("rules") or []
+        added = []
+        for t in fresh:
+            while True:
+                tid = "".join(secrets.choice("0123456789abcdefghijklmnopqrstuvwxyz") for _ in range(8)) + \
+                      "".join(secrets.choice("0123456789abcdefghijklmnopqrstuvwxyz") for _ in range(4))
+                if tid not in ids:
+                    break
+            ids.add(tid)
+            added.append({"id": tid, "date": t["date"], "label": t["label"], "amount": t["amount"],
+                          "category": bank_csv.categorize(t, rules), "manual": False})
+        existing.extend(added)
+        budget["lastImport"] = date.today().isoformat()
+        unc = sum(1 for a in added if a["category"] == bank_csv.UNCATEGORIZED)
+        return {"importees": len(added), "deja_presentes_ignorees": len(dups), "a_categoriser": unc}
+
+    try:
+        _need_cloud()
+        res = vault.update(modify)
+    except (DataError, vault.VaultError) as e:
+        return {"erreur": str(e)}
+    del _pending_csv[code_confirmation.strip()]
+    return {**res, "message": "Importé. L'appli le récupère à sa prochaine synchro (ouvrez-la ou attendez ~1 min)."}
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 
